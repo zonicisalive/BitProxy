@@ -1,0 +1,503 @@
+From db3a695e51018e7943ecb2a749591e128ebdf4bf Mon Sep 17 00:00:00 2001
+From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 01:14:02 +0530
+Subject: [PATCH 21/35] bitproxy: Block mode per app; sniff strictly after all
+ app rules
+
+Block: a third mode next to VPN and Direct. Blocked apps get a reject
+rule for their traffic and their DNS (no internet at all). Dashboard
+rows use a VPN / Direct / Block selector under the app name, the app
+picker has Block / Unblock in its menu, new-app notifications get a
+Block action. Apps sharing a uid take the most restrictive mode.
+
+Sniff order fix: with a domain list, sniff now comes after every app
+rule, as the spec says; before, Direct apps were sniffed first, which
+is what stalled TCP on the phone. The domain list therefore applies to
+apps that are not in the list.
+---
+ .../nekohasekai/sfa/bitproxy/AppResolver.kt   |  5 +-
+ .../io/nekohasekai/sfa/bitproxy/AppWatcher.kt |  5 +-
+ .../nekohasekai/sfa/bitproxy/BitProxyPrefs.kt |  3 +-
+ .../sfa/bitproxy/config/ConfigGenerator.kt    | 35 ++++++++++----
+ .../sfa/bitproxy/ui/AppPickerScreen.kt        | 19 ++++++--
+ .../sfa/bitproxy/ui/BitProxyScreen.kt         | 15 +++---
+ .../sfa/bitproxy/ui/DashboardAppsCard.kt      | 39 +++++++++++----
+ .../nekohasekai/sfa/bitproxy/AppScanTest.kt   |  8 +++-
+ .../bitproxy/config/ConfigGeneratorTest.kt    | 47 ++++++++++++-------
+ 9 files changed, 122 insertions(+), 54 deletions(-)
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppResolver.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppResolver.kt
+index a36ff86..3b2a157 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppResolver.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppResolver.kt
+@@ -8,8 +8,8 @@ import android.os.Process
+ import android.util.Log
+ import io.nekohasekai.sfa.Application
+ import io.nekohasekai.sfa.bitproxy.BitProxyPrefs.AppKey
+-import io.nekohasekai.sfa.bitproxy.BitProxyPrefs.Mode
+ import io.nekohasekai.sfa.bitproxy.config.AppRoute
++import io.nekohasekai.sfa.bitproxy.config.Mode
+ import java.util.concurrent.TimeUnit
+ 
+ /** Android uid = userId * 100000 + appId. */
+@@ -69,7 +69,8 @@ class AppScan(
+                 label = names + Uid.userLabel(userId),
+                 packageName = members.first().first.packageName,
+                 uids = listOf(uid),
+-                viaVpn = members.any { it.second == Mode.VPN }, // shared uid: VPN wins, never leak
++                // shared uid, members disagree: the most restrictive wins, never leak
++                mode = members.map { it.second }.maxBy { listOf(Mode.DIRECT, Mode.VPN, Mode.BLOCK).indexOf(it) },
+             )
+         }
+     }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppWatcher.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppWatcher.kt
+index 61a0fa8..7e31f33 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppWatcher.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppWatcher.kt
+@@ -19,7 +19,7 @@ import androidx.core.content.ContextCompat
+ import io.nekohasekai.sfa.Application
+ import io.nekohasekai.sfa.R
+ import io.nekohasekai.sfa.bitproxy.BitProxyPrefs.AppKey
+-import io.nekohasekai.sfa.bitproxy.BitProxyPrefs.Mode
++import io.nekohasekai.sfa.bitproxy.config.Mode
+ import io.nekohasekai.sfa.database.Settings
+ import kotlinx.coroutines.CoroutineScope
+ import kotlinx.coroutines.Dispatchers
+@@ -127,7 +127,7 @@ object AppWatcher {
+         }
+         fun action(mode: Mode, requestCode: Int) = PendingIntent.getBroadcast(
+             Application.application,
+-            key.packageName.hashCode() * 2 + requestCode,
++            key.packageName.hashCode() * 3 + requestCode,
+             Intent(ACTION_CHOOSE).setPackage(Application.application.packageName)
+                 .putExtra(EXTRA_PACKAGE, key.packageName).putExtra(EXTRA_MODE, mode.name),
+             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+@@ -141,6 +141,7 @@ object AppWatcher {
+                 .setContentText("Route $label through VPN or Direct?")
+                 .addAction(0, "VPN", action(Mode.VPN, 0))
+                 .addAction(0, "Direct", action(Mode.DIRECT, 1))
++                .addAction(0, "Block", action(Mode.BLOCK, 2))
+                 .setAutoCancel(true)
+                 .build(),
+         )
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+index 35fe9f0..dc3117c 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+@@ -4,6 +4,7 @@ package io.nekohasekai.sfa.bitproxy
+ import android.content.Context
+ import androidx.core.content.edit
+ import io.nekohasekai.sfa.Application
++import io.nekohasekai.sfa.bitproxy.config.Mode
+ 
+ /**
+  * BitProxy choices. Apps are keyed by package name + Android user id, never by raw uid,
+@@ -23,8 +24,6 @@ object BitProxyPrefs {
+         }
+     }
+ 
+-    enum class Mode { VPN, DIRECT }
+-
+     var selectedServer: String?
+         get() = prefs.getString("selected_server", null)
+         set(value) = prefs.edit { putString("selected_server", value) }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
+index f31a935..f457c45 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
+@@ -15,13 +15,18 @@ import kotlinx.serialization.json.put
+ import kotlinx.serialization.json.putJsonArray
+ import kotlinx.serialization.json.putJsonObject
+ 
++/** How an app's traffic goes out. BLOCK rejects its traffic and DNS (no internet at all). */
++enum class Mode { VPN, DIRECT, BLOCK }
++
+ /** One switch row: an app in one Android user (main, clone, profile), with its live UIDs. */
+ data class AppRoute(
+     val label: String,
+     val packageName: String,
+     val uids: List<Int>,
+-    val viaVpn: Boolean,
+-)
++    val mode: Mode,
++) {
++    val viaVpn: Boolean get() = mode == Mode.VPN
++}
+ 
+ data class GeneratorInput(
+     /** Parsed configs in display order; endpoint tags are derived from their names. */
+@@ -116,6 +121,7 @@ object ConfigGenerator {
+         val routes = input.apps.filter { it.uids.isNotEmpty() }
+         val domains = input.vpnDomains.map { it.trim().trimStart('.').lowercase() }.filter { it.isNotEmpty() }.distinct()
+         val vpnUids = routes.filter { it.viaVpn }.flatMap { it.uids }.distinct().sorted()
++        val blockUids = routes.filter { it.mode == Mode.BLOCK }.flatMap { it.uids }.distinct().sorted()
+ 
+         val config = buildJsonObject {
+             putJsonObject("log") { put("level", "warn") }
+@@ -135,6 +141,12 @@ object ConfigGenerator {
+                 }
+                 // Only VPN apps resolve through the tunnel, so Direct apps keep DNS when the server is down.
+                 putJsonArray("rules") {
++                    if (blockUids.isNotEmpty()) {
++                        addJsonObject {
++                            put("user_id", intArray(blockUids))
++                            put("action", "reject")
++                        }
++                    }
+                     if (vpnUids.isNotEmpty()) {
+                         addJsonObject {
+                             put("user_id", intArray(vpnUids))
+@@ -187,24 +199,27 @@ object ConfigGenerator {
+                         put("action", "hijack-dns")
+                     }
+                     // user_id, not package_name: package rules did not match on OxygenOS.
+-                    // No "sniff" before the VPN app rules: it stopped pre-match and stalled TCP.
+-                    // With a VPN domain list, sniffing happens only after them, for Direct apps.
+-                    fun appRules(filter: (AppRoute) -> Boolean) = routes.filter(filter).forEach { app ->
++                    // No "sniff" before any app rule: on the phone it stopped pre-match and
++                    // stalled TCP. With a domain list, sniffing only happens after all app rules,
++                    // so it only ever sees traffic of apps that are not in the list.
++                    if (blockUids.isNotEmpty()) {
++                        addJsonObject {
++                            put("user_id", intArray(blockUids))
++                            put("action", "reject")
++                        }
++                    }
++                    for (app in routes.filter { it.mode != Mode.BLOCK }) {
+                         addJsonObject {
+                             put("user_id", intArray(app.uids.sorted()))
+                             put("outbound", if (app.viaVpn) VPN else DIRECT)
+                         }
+                     }
+-                    if (domains.isEmpty()) {
+-                        appRules { true }
+-                    } else {
+-                        appRules { it.viaVpn }
++                    if (domains.isNotEmpty()) {
+                         addJsonObject { put("action", "sniff") }
+                         addJsonObject {
+                             put("domain_suffix", buildJsonArray { domains.forEach { add(it) } })
+                             put("outbound", VPN)
+                         }
+-                        appRules { !it.viaVpn }
+                     }
+                 }
+                 put("final", DIRECT)
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/AppPickerScreen.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/AppPickerScreen.kt
+index 91b9c6f..31cc6f9 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/AppPickerScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/AppPickerScreen.kt
+@@ -48,8 +48,8 @@ import io.nekohasekai.sfa.bitproxy.AppResolver
+ import io.nekohasekai.sfa.bitproxy.AppScan
+ import io.nekohasekai.sfa.bitproxy.BitProxyPrefs
+ import io.nekohasekai.sfa.bitproxy.BitProxyPrefs.AppKey
+-import io.nekohasekai.sfa.bitproxy.BitProxyPrefs.Mode
+ import io.nekohasekai.sfa.bitproxy.Uid
++import io.nekohasekai.sfa.bitproxy.config.Mode
+ import io.nekohasekai.sfa.compose.topbar.LocalScaffoldPadding
+ import io.nekohasekai.sfa.compose.topbar.OverrideTopBar
+ import kotlinx.coroutines.Dispatchers
+@@ -135,10 +135,19 @@ fun AppPickerScreen(navController: NavController) {
+         }
+         items(rows, key = { it.keys.first().toString() }) { row ->
+             val vpn = row.keys.any { choices[it] == Mode.VPN }
++            val blocked = row.keys.any { choices[it] == Mode.BLOCK }
+             var menu by remember { mutableStateOf(false) }
+             ListItem(
+                 headlineContent = { Text(row.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+-                supportingContent = { Text(row.subtitle, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall) },
++                supportingContent = {
++                    Text(
++                        (if (blocked) "BLOCKED · " else "") + row.subtitle,
++                        maxLines = 2,
++                        overflow = TextOverflow.Ellipsis,
++                        style = MaterialTheme.typography.bodySmall,
++                        color = if (blocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
++                    )
++                },
+                 leadingContent = { AppIcon(row.keys.first().packageName) },
+                 trailingContent = {
+                     Row(verticalAlignment = Alignment.CenterVertically) {
+@@ -152,10 +161,14 @@ fun AppPickerScreen(navController: NavController) {
+                                     if (!hasClone) {
+                                         DropdownMenuItem(text = { Text("Add clone (user ${Uid.CLONE_USER})") }, onClick = {
+                                             menu = false
+-                                            set(clone, if (vpn) Mode.VPN else Mode.DIRECT)
++                                            set(clone, row.keys.firstNotNullOfOrNull { choices[it] } ?: Mode.DIRECT)
+                                         })
+                                     }
+                                 }
++                                DropdownMenuItem(text = { Text(if (blocked) "Unblock (Direct)" else "Block (no internet)") }, onClick = {
++                                    menu = false
++                                    set(row.keys, if (blocked) Mode.DIRECT else Mode.BLOCK)
++                                })
+                                 if (row.keys.any { it in choices }) {
+                                     DropdownMenuItem(text = { Text(if (row.manualClone) "Remove clone" else "Forget choice") }, onClick = {
+                                         menu = false
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+index 4285610..76526d1 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+@@ -59,6 +59,7 @@ import io.nekohasekai.sfa.bitproxy.BitProxyApplier
+ import io.nekohasekai.sfa.bitproxy.BitProxyPrefs
+ import io.nekohasekai.sfa.bitproxy.BitProxyStore
+ import io.nekohasekai.sfa.bitproxy.StoredServer
++import io.nekohasekai.sfa.bitproxy.config.Mode
+ import io.nekohasekai.sfa.compose.topbar.LocalScaffoldPadding
+ import io.nekohasekai.sfa.compose.topbar.OverrideTopBar
+ import io.nekohasekai.sfa.constant.Status
+@@ -125,7 +126,7 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+     var domains by remember { mutableStateOf(BitProxyPrefs.vpnDomains.joinToString("\n")) }
+     val context = LocalContext.current
+     var confirmDelete by remember { mutableStateOf<StoredServer?>(null) }
+-    val appCounts = remember { BitProxyPrefs.apps.values.let { v -> v.count { it == BitProxyPrefs.Mode.VPN } to v.count { it == BitProxyPrefs.Mode.DIRECT } } }
++    val appCounts = remember { BitProxyPrefs.apps.values.groupingBy { it }.eachCount() }
+ 
+     LaunchedEffect(reload) {
+         servers = withContext(Dispatchers.IO) { BitProxyStore.servers() }
+@@ -226,9 +227,11 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+             ListItem(
+                 headlineContent = { Text("Apps") },
+                 supportingContent = {
+-                    val vpn = appCounts.first
+-                    val direct = appCounts.second
+-                    Text("$vpn through VPN, $direct Direct. Everything else goes Direct.")
++                    val blocked = appCounts[Mode.BLOCK] ?: 0
++                    Text(
++                        "${appCounts[Mode.VPN] ?: 0} through VPN, ${appCounts[Mode.DIRECT] ?: 0} Direct" +
++                            (if (blocked > 0) ", $blocked blocked" else "") + ". Everything else goes Direct.",
++                    )
+                 },
+                 leadingContent = { Icon(Icons.Outlined.Apps, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
+                 modifier = Modifier.clickable { navController.navigate("settings/bitproxy/apps") },
+@@ -291,8 +294,8 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+             Column(Modifier.padding(16.dp)) {
+                 Text("Always through VPN", style = MaterialTheme.typography.titleMedium)
+                 Text(
+-                    "Domains (one per line, subdomains included) that use the VPN even from Direct apps. " +
+-                        "Leave empty if you don't need it: Direct apps' traffic is then never inspected.",
++                    "Domains (one per line, subdomains included) that use the VPN from apps that are not in " +
++                        "your app list. Apps you set to VPN, Direct or Block are never inspected. Leave empty if unused.",
+                     style = MaterialTheme.typography.bodySmall,
+                     color = MaterialTheme.colorScheme.onSurfaceVariant,
+                     modifier = Modifier.padding(vertical = 8.dp),
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DashboardAppsCard.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DashboardAppsCard.kt
+index 1955cae..b96cc16 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DashboardAppsCard.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DashboardAppsCard.kt
+@@ -17,7 +17,9 @@ import androidx.compose.material3.Icon
+ import androidx.compose.material3.ListItem
+ import androidx.compose.material3.ListItemDefaults
+ import androidx.compose.material3.MaterialTheme
+-import androidx.compose.material3.Switch
++import androidx.compose.material3.SegmentedButton
++import androidx.compose.material3.SegmentedButtonDefaults
++import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+ import androidx.compose.material3.Text
+ import androidx.compose.material3.TextButton
+ import androidx.compose.runtime.Composable
+@@ -36,8 +38,8 @@ import io.nekohasekai.sfa.bitproxy.AppResolver
+ import io.nekohasekai.sfa.bitproxy.BitProxyApplier
+ import io.nekohasekai.sfa.bitproxy.BitProxyPrefs
+ import io.nekohasekai.sfa.bitproxy.BitProxyPrefs.AppKey
+-import io.nekohasekai.sfa.bitproxy.BitProxyPrefs.Mode
+ import io.nekohasekai.sfa.bitproxy.Uid
++import io.nekohasekai.sfa.bitproxy.config.Mode
+ import io.nekohasekai.sfa.compose.base.GlobalEventBus
+ import io.nekohasekai.sfa.compose.base.UiEvent
+ import io.nekohasekai.sfa.constant.Status
+@@ -55,6 +57,12 @@ fun LazyListScope.bitProxyDashboardItems(serviceStatus: Status) {
+ 
+ private data class AppRow(val key: AppKey, val label: String)
+ 
++private val Mode.label get() = when (this) {
++    Mode.VPN -> "VPN"
++    Mode.DIRECT -> "Direct"
++    Mode.BLOCK -> "Block"
++}
++
+ /**
+  * VPN / Direct switch for every configured app, right on the dashboard. A flip is saved and
+  * re-applied (batched), so the app's DNS rule follows too, unlike switching in the Groups tab.
+@@ -76,8 +84,8 @@ private fun DashboardAppsCard(serviceStatus: Status) {
+         }
+     }
+ 
+-    fun flip(key: AppKey, vpn: Boolean) {
+-        choices = choices + (key to if (vpn) Mode.VPN else Mode.DIRECT)
++    fun flip(key: AppKey, mode: Mode) {
++        choices = choices + (key to mode)
+         BitProxyPrefs.apps = choices
+         applyJob?.cancel()
+         status = "Applying…"
+@@ -108,8 +116,9 @@ private fun DashboardAppsCard(serviceStatus: Status) {
+                 Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                     Text("Apps", style = MaterialTheme.typography.titleMedium)
+                     if (collapsed) {
+-                        val vpn = choices.values.count { it == Mode.VPN }
+-                        Text("$vpn VPN · ${choices.size - vpn} Direct", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
++                        val n = choices.values.groupingBy { it }.eachCount()
++                        val blocked = n[Mode.BLOCK]?.let { " · $it Blocked" } ?: ""
++                        Text("${n[Mode.VPN] ?: 0} VPN · ${n[Mode.DIRECT] ?: 0} Direct$blocked", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                     }
+                 }
+                 TextButton(onClick = { GlobalEventBus.tryEmit(UiEvent.Navigate("settings/bitproxy/apps")) }) { Text("Manage") }
+@@ -132,13 +141,23 @@ private fun DashboardAppsCard(serviceStatus: Status) {
+                     modifier = Modifier.padding(16.dp),
+                 )
+                 else -> list.forEach { row ->
+-                    val vpn = choices[row.key] == Mode.VPN
++                    val mode = choices[row.key] ?: Mode.DIRECT
+                     ListItem(
+                         headlineContent = { Text(row.label, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+-                        supportingContent = { Text(if (vpn) "VPN" else "Direct", style = MaterialTheme.typography.bodySmall) },
+                         leadingContent = { AppIcon(row.key.packageName) },
+-                        trailingContent = { Switch(checked = vpn, onCheckedChange = { flip(row.key, it) }) },
+-                        modifier = Modifier.clickable { flip(row.key, !vpn) },
++                        supportingContent = {
++                            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(top = 4.dp)) {
++                                Mode.entries.forEachIndexed { i, m ->
++                                    SegmentedButton(
++                                        selected = mode == m,
++                                        onClick = { if (mode != m) flip(row.key, m) },
++                                        shape = SegmentedButtonDefaults.itemShape(i, Mode.entries.size),
++                                        icon = {},
++                                        label = { Text(m.label, style = MaterialTheme.typography.labelSmall, maxLines = 1) },
++                                    )
++                                }
++                            }
++                        },
+                         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                     )
+                 }
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/AppScanTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/AppScanTest.kt
+index 7fe4640..9d61f14 100644
+--- a/app/src/test/java/io/nekohasekai/sfa/bitproxy/AppScanTest.kt
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/AppScanTest.kt
+@@ -2,7 +2,7 @@
+ package io.nekohasekai.sfa.bitproxy
+ 
+ import io.nekohasekai.sfa.bitproxy.BitProxyPrefs.AppKey
+-import io.nekohasekai.sfa.bitproxy.BitProxyPrefs.Mode
++import io.nekohasekai.sfa.bitproxy.config.Mode
+ import org.junit.Assert.assertEquals
+ import org.junit.Assert.assertTrue
+ import org.junit.Test
+@@ -51,6 +51,12 @@ class AppScanTest {
+         assertEquals(3, routes.size)
+     }
+ 
++    @Test fun sharedUidBlockWinsOverVpn() {
++        val choices = mapOf(AppKey("s.one", 0) to Mode.VPN, AppKey("s.two", 0) to Mode.BLOCK)
++        val route = scan(AppKey("s.one", 0) to 10300, AppKey("s.two", 0) to 10300).routes(choices).single()
++        assertEquals(Mode.BLOCK, route.mode)
++    }
++
+     @Test fun sharedUidIsOneRouteAndVpnWins() {
+         val choices = mapOf(AppKey("s.one", 0) to Mode.DIRECT, AppKey("s.two", 0) to Mode.VPN)
+         val route = scan(AppKey("s.one", 0) to 10300, AppKey("s.two", 0) to 10300).routes(choices).single()
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
+index 79330f0..d049132 100644
+--- a/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
+@@ -64,12 +64,12 @@ class ConfigGeneratorTest {
+ 
+     // Same apps and UIDs as golden/two-servers/pm.txt, in the script's APPS order.
+     private val twoServerApps = listOf(
+-        AppRoute("WhatsApp Business", "com.whatsapp.w4b", listOf(10150), true),
+-        AppRoute("WhatsApp Business (Clone)", "com.whatsapp.w4b", listOf(99910150), true),
+-        AppRoute("Firefox", "org.mozilla.firefox", listOf(10123), true),
+-        AppRoute("Discord", "com.discord", listOf(10160), true),
+-        AppRoute("Discord (Profile 10)", "com.discord", listOf(1010160), true),
+-        AppRoute("Discord (Clone)", "com.discord", listOf(99910160), true),
++        AppRoute("WhatsApp Business", "com.whatsapp.w4b", listOf(10150), Mode.VPN),
++        AppRoute("WhatsApp Business (Clone)", "com.whatsapp.w4b", listOf(99910150), Mode.VPN),
++        AppRoute("Firefox", "org.mozilla.firefox", listOf(10123), Mode.VPN),
++        AppRoute("Discord", "com.discord", listOf(10160), Mode.VPN),
++        AppRoute("Discord (Profile 10)", "com.discord", listOf(1010160), Mode.VPN),
++        AppRoute("Discord (Clone)", "com.discord", listOf(99910160), Mode.VPN),
+     )
+ 
+     @Test fun matchesScriptTwoServers() {
+@@ -80,7 +80,7 @@ class ConfigGeneratorTest {
+ 
+     @Test fun matchesScriptEdgeCases() {
+         // CRLF, PSK, keepalive, MTU, [IPv6]:port and hostname endpoints, duplicate tags wg / wg-2.
+-        val r = ok(GeneratorInput(servers("edge-cases"), null, listOf(AppRoute("Proton Mail", "ch.protonmail.android", listOf(10200), true))))
++        val r = ok(GeneratorInput(servers("edge-cases"), null, listOf(AppRoute("Proton Mail", "ch.protonmail.android", listOf(10200), Mode.VPN))))
+         assertEquals(expected("edge-cases"), r.config)
+     }
+ 
+@@ -115,7 +115,7 @@ class ConfigGeneratorTest {
+     }
+ 
+     @Test fun directAppsResolveLocally() {
+-        val apps = twoServerApps.mapIndexed { i, a -> a.copy(viaVpn = i != 2) } // Firefox Direct
++        val apps = twoServerApps.mapIndexed { i, a -> a.copy(mode = if (i != 2) Mode.VPN else Mode.DIRECT) } // Firefox Direct
+         val r = ok(GeneratorInput(servers("two-servers"), null, apps))
+         val dnsUids = r.config["dns"]!!.jsonObject["rules"]!!.jsonArray[0].jsonObject["user_id"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() }
+         assertFalse(10123 in dnsUids)
+@@ -123,15 +123,15 @@ class ConfigGeneratorTest {
+         assertEquals("VPN", outboundOf(r, 10150))
+ 
+         // All Direct: no DNS rule at all (an empty user_id list would be invalid).
+-        val allDirect = ok(GeneratorInput(servers("two-servers"), null, apps.map { it.copy(viaVpn = false) }))
++        val allDirect = ok(GeneratorInput(servers("two-servers"), null, apps.map { it.copy(mode = Mode.DIRECT) }))
+         assertEquals(JsonArray(emptyList()), allDirect.config["dns"]!!.jsonObject["rules"])
+     }
+ 
+     @Test fun uninstalledAppsAreSkippedAndNoPerAppGroups() {
+         val apps = listOf(
+-            AppRoute("Chat", "a.chat", listOf(10001), true),
+-            AppRoute("Direct", "c.weird", listOf(10003), false), // a label can't clash with anything
+-            AppRoute("Gone", "d.gone", emptyList(), true),
++            AppRoute("Chat", "a.chat", listOf(10001), Mode.VPN),
++            AppRoute("Direct", "c.weird", listOf(10003), Mode.DIRECT), // a label can't clash with anything
++            AppRoute("Gone", "d.gone", emptyList(), Mode.VPN),
+         )
+         val r = ok(GeneratorInput(servers("two-servers"), null, apps))
+         val tags = r.config["outbounds"]!!.jsonArray.map { it.jsonObject["tag"]!!.jsonPrimitive.content }
+@@ -170,16 +170,14 @@ class ConfigGeneratorTest {
+         assertEquals(listOf("nl-free#1", "us-free-2"), vpn["outbounds"]!!.jsonArray.map { it.jsonPrimitive.content })
+     }
+ 
+-    @Test fun vpnDomainsSniffOnlyAfterVpnApps() {
+-        val apps = twoServerApps.mapIndexed { i, a -> a.copy(viaVpn = i != 2) } // Firefox Direct
++    @Test fun vpnDomainsSniffOnlyAfterAllAppRules() {
++        val apps = twoServerApps.mapIndexed { i, a -> a.copy(mode = if (i != 2) Mode.VPN else Mode.DIRECT) } // Firefox Direct
+         val r = ok(GeneratorInput(servers("two-servers"), null, apps, vpnDomains = listOf(" .Example.COM", "example.com", "")))
+         val rules = r.config["route"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
+         val sniff = rules.indexOfFirst { it["action"]?.jsonPrimitive?.content == "sniff" }
+         val domain = rules.indexOfFirst { "domain_suffix" in it }
+-        fun ruleFor(uid: Int) = rules.indexOfFirst { r -> r["user_id"]?.jsonArray?.any { it.jsonPrimitive.content.toInt() == uid } == true }
+-        val firefox = ruleFor(10123)
+-        val lastVpnApp = ruleFor(99910160) // Discord (Clone), last VPN app
+-        assertTrue(lastVpnApp < sniff && sniff < domain && domain < firefox)
++        val lastAppRule = rules.indexOfLast { "user_id" in it }
++        assertTrue(lastAppRule < sniff && sniff < domain) // listed apps never pass a sniff rule
+         assertEquals("VPN", rules[domain]["outbound"]!!.jsonPrimitive.content)
+         assertEquals(listOf("example.com"), rules[domain]["domain_suffix"]!!.jsonArray.map { it.jsonPrimitive.content })
+         val dnsRules = r.config["dns"]!!.jsonObject["rules"]!!.jsonArray
+@@ -191,6 +189,19 @@ class ConfigGeneratorTest {
+         assertFalse("sniff" in json)
+     }
+ 
++    @Test fun blockedAppsAreRejectedIncludingDns() {
++        val apps = twoServerApps.mapIndexed { i, a -> if (i == 2) a.copy(mode = Mode.BLOCK) else a } // Firefox blocked
++        val r = ok(GeneratorInput(servers("two-servers"), null, apps, vpnDomains = listOf("example.com")))
++        val rules = r.config["route"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
++        val block = rules.indexOfFirst { it["action"]?.jsonPrimitive?.content == "reject" }
++        assertEquals(1, block) // right after hijack-dns, before any sniff or app rule
++        assertEquals(listOf(10123), rules[block]["user_id"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
++        assertEquals(1, rules.count { r -> r["user_id"]?.jsonArray?.any { it.jsonPrimitive.content == "10123" } == true })
++        val dns = r.config["dns"]!!.jsonObject["rules"]!!.jsonArray[0].jsonObject
++        assertEquals("reject", dns["action"]!!.jsonPrimitive.content)
++        assertFalse(10123 in r.config["dns"]!!.jsonObject["rules"]!!.jsonArray[1].jsonObject["user_id"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
++    }
++
+     @Test fun noServersIsAnError() {
+         assertTrue(ConfigGenerator.generate(GeneratorInput(emptyList(), null, twoServerApps)) is GenerateResult.Error)
+     }
+-- 
+2.55.0
+

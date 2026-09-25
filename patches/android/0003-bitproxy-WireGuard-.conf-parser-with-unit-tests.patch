@@ -1,0 +1,491 @@
+From 8b4430add828a3a0b7e04bc4ed549e66e7d60c03 Mon Sep 17 00:00:00 2001
+From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
+Date: Thu, 24 Sep 2026 23:43:41 +0530
+Subject: [PATCH 03/35] bitproxy: WireGuard .conf parser with unit tests
+
+Pure-Kotlin parser for wg-quick configs (Proton VPN exports and others),
+mirroring reference/conf-merger.py with added validation: BOM/CRLF,
+comments, repeated keys, comma lists, multiple peers, bracketed IPv6 and
+hostname endpoints, key/port/MTU checks. Requires an IPv4 tunnel address
+and a DNS server. Adds JUnit for local unit tests.
+---
+ app/build.gradle.kts                          |   1 +
+ .../io/nekohasekai/sfa/bitproxy/net/Ip.kt     |  91 +++++++++
+ .../sfa/bitproxy/wireguard/WireGuardConf.kt   | 158 +++++++++++++++
+ .../bitproxy/wireguard/WireGuardConfTest.kt   | 189 ++++++++++++++++++
+ 4 files changed, 439 insertions(+)
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/net/Ip.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/wireguard/WireGuardConf.kt
+ create mode 100644 app/src/test/java/io/nekohasekai/sfa/bitproxy/wireguard/WireGuardConfTest.kt
+
+diff --git a/app/build.gradle.kts b/app/build.gradle.kts
+index 006ee94..e484d2e 100644
+--- a/app/build.gradle.kts
++++ b/app/build.gradle.kts
+@@ -348,6 +348,7 @@ dependencies {
+     "androidTestOtherImplementation"(composeBom24)
+     "androidTestOtherLegacyImplementation"(composeBom21)
+     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
++    testImplementation("junit:junit:4.13.2")
+ 
+     // Common Compose-related libraries
+     implementation("sh.calvin.reorderable:reorderable:3.1.0")
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/net/Ip.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/net/Ip.kt
+new file mode 100644
+index 0000000..8e5737c
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/net/Ip.kt
+@@ -0,0 +1,91 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.net
++
++/**
++ * Literal IP address. Parsing never does DNS lookups (unlike InetAddress.getByName),
++ * so it is safe on any thread and for untrusted input.
++ * [text] keeps the original spelling so generated configs match the .conf file.
++ */
++class IpAddress private constructor(val bytes: ByteArray, val text: String) {
++    val isV4: Boolean get() = bytes.size == 4
++
++    override fun toString() = text
++
++    override fun equals(other: Any?) = other is IpAddress && bytes.contentEquals(other.bytes)
++
++    override fun hashCode() = bytes.contentHashCode()
++
++    companion object {
++        fun parse(input: String): IpAddress? {
++            val s = input.trim()
++            val bytes = if (':' in s) parseV6(s) else parseV4(s)
++            return bytes?.let { IpAddress(it, s) }
++        }
++
++        fun fromBytes(bytes: ByteArray): IpAddress {
++            require(bytes.size == 4) { "only IPv4 is formatted" }
++            return IpAddress(bytes, bytes.joinToString(".") { (it.toInt() and 0xff).toString() })
++        }
++
++        private fun parseV4(s: String): ByteArray? {
++            val parts = s.split('.')
++            if (parts.size != 4) return null
++            return ByteArray(4) { i ->
++                val p = parts[i]
++                if (p.isEmpty() || p.length > 3 || !p.all(Char::isDigit)) return null
++                if (p.length > 1 && p[0] == '0') return null // leading zeros are ambiguous (octal)
++                val v = p.toInt()
++                if (v > 255) return null
++                v.toByte()
++            }
++        }
++
++        private fun parseV6(input: String): ByteArray? {
++            if ('%' in input) return null // zone ids are not valid in configs
++            // Rewrite an embedded IPv4 tail (::ffff:1.2.3.4) as two hex groups.
++            var s = input
++            val lastColon = s.lastIndexOf(':')
++            if ('.' in s.substring(lastColon + 1)) {
++                val v4 = parseV4(s.substring(lastColon + 1)) ?: return null
++                fun word(i: Int) = ((v4[i].toInt() and 0xff) shl 8 or (v4[i + 1].toInt() and 0xff)).toString(16)
++                s = s.substring(0, lastColon + 1) + word(0) + ":" + word(2)
++            }
++            val halves = s.split("::")
++            if (halves.size > 2) return null
++            fun groups(part: String): List<Int>? {
++                if (part.isEmpty()) return emptyList()
++                return part.split(':').map { g ->
++                    if (g.isEmpty() || g.length > 4 || !g.all { it.isDigit() || it.lowercaseChar() in 'a'..'f' }) return null
++                    g.toInt(16)
++                }
++            }
++            val head = groups(halves[0]) ?: return null
++            val tail = if (halves.size == 2) groups(halves[1]) ?: return null else emptyList()
++            val words = if (halves.size == 1) {
++                head.takeIf { it.size == 8 } ?: return null
++            } else {
++                if (head.size + tail.size > 7) return null
++                head + List(8 - head.size - tail.size) { 0 } + tail
++            }
++            return ByteArray(16) { i -> (words[i / 2] shr (if (i % 2 == 0) 8 else 0)).toByte() }
++        }
++    }
++}
++
++/** Address with prefix length, e.g. "10.2.0.2/32". A bare address means a single host. */
++data class IpPrefix(val address: IpAddress, val prefixLength: Int) {
++    override fun toString() = "$address/$prefixLength"
++
++    companion object {
++        fun parse(input: String): IpPrefix? {
++            val s = input.trim()
++            val slash = s.indexOf('/')
++            val address = IpAddress.parse(if (slash < 0) s else s.substring(0, slash)) ?: return null
++            val max = if (address.isV4) 32 else 128
++            if (slash < 0) return IpPrefix(address, max)
++            val len = s.substring(slash + 1).takeIf { it.isNotEmpty() && it.all(Char::isDigit) && it.length <= 3 }?.toInt()
++            if (len == null || len > max) return null
++            return IpPrefix(address, len)
++        }
++    }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/wireguard/WireGuardConf.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/wireguard/WireGuardConf.kt
+new file mode 100644
+index 0000000..57ae948
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/wireguard/WireGuardConf.kt
+@@ -0,0 +1,158 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.wireguard
++
++import io.nekohasekai.sfa.bitproxy.net.IpAddress
++import io.nekohasekai.sfa.bitproxy.net.IpPrefix
++import kotlin.io.encoding.Base64
++import kotlin.io.encoding.ExperimentalEncodingApi
++
++data class WireGuardPeer(
++    val host: String,
++    val port: Int,
++    val publicKey: String,
++    val allowedIps: List<String>,
++    val presharedKey: String? = null,
++    val persistentKeepalive: Int? = null,
++)
++
++data class WireGuardConf(
++    /** File name without .conf / .conf.txt; the endpoint tag is derived from it. */
++    val name: String,
++    val addresses: List<IpPrefix>,
++    val privateKey: String,
++    val dns: List<IpAddress>,
++    val mtu: Int?,
++    val peers: List<WireGuardPeer>,
++) {
++    /** Always present: parse() rejects configs without an IPv4 tunnel address. */
++    val ipv4Address: IpPrefix get() = addresses.first { it.address.isV4 }
++    val ipv6Address: IpPrefix? get() = addresses.firstOrNull { !it.address.isV4 }
++    val ipv4Dns: IpAddress? get() = dns.firstOrNull { it.isV4 } ?: dns.firstOrNull()
++
++    /** Never includes key material, so it is safe for logs. */
++    override fun toString() = "WireGuardConf(name=$name, addresses=$addresses, dns=$dns, mtu=$mtu, peers=${peers.map { "${it.host}:${it.port}" }})"
++}
++
++sealed interface ParseResult {
++    data class Ok(val conf: WireGuardConf, val warnings: List<String>) : ParseResult
++
++    data class Error(val message: String) : ParseResult
++}
++
++/**
++ * Parser for wg-quick style .conf files (as exported by Proton VPN and others).
++ * Mirrors reference/conf-merger.py, plus validation so a bad file gives a clear
++ * message instead of a broken sing-box config. Never throws.
++ */
++object WireGuardConfParser {
++    private val SECTION = Regex("""^\[(\w+)]$""")
++    private val HOSTNAME = Regex("""^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*\.?$""")
++    private val BOM = Char(0xFEFF).toString()
++    private val DEFAULT_ALLOWED_IPS = listOf("0.0.0.0/0", "::/0")
++
++    fun nameFromFileName(fileName: String): String = fileName.substringAfterLast('/').replace(Regex("""\.conf(\.txt)?$""", RegexOption.IGNORE_CASE), "")
++
++    fun parse(text: String, fileName: String): ParseResult = try {
++        parseInternal(text, nameFromFileName(fileName))
++    } catch (e: Exception) {
++        // Defensive: parsing bugs must never crash the app.
++        ParseResult.Error("$fileName: could not be read (${e.javaClass.simpleName})")
++    }
++
++    private class Invalid(message: String) : Exception(message)
++
++    private fun parseInternal(text: String, name: String): ParseResult {
++        val sections = mutableMapOf<String, MutableList<MutableMap<String, MutableList<String>>>>()
++        var current: MutableMap<String, MutableList<String>>? = null
++        for (raw in text.removePrefix(BOM).lines()) {
++            val line = raw.substringBefore('#').trim()
++            if (line.isEmpty()) continue
++            SECTION.matchEntire(line)?.let {
++                current = mutableMapOf<String, MutableList<String>>().also { s -> sections.getOrPut(it.groupValues[1].lowercase()) { mutableListOf() }.add(s) }
++                continue
++            }
++            val section = current ?: continue
++            if ('=' !in line) continue
++            val key = line.substringBefore('=').trim().lowercase()
++            section.getOrPut(key) { mutableListOf() }.add(line.substringAfter('=').trim())
++        }
++
++        val iface = sections["interface"]?.firstOrNull() ?: return error(name, "missing [Interface] section")
++        return try {
++            val warnings = mutableListOf<String>()
++            val privateKey = iface.one("privatekey") ?: throw Invalid("missing PrivateKey")
++            checkKey(privateKey, "PrivateKey")
++
++            val addresses = splitList(iface["address"]).map { IpPrefix.parse(it) ?: throw Invalid("Address \"$it\" is not a valid IP address") }
++            if (addresses.none { it.address.isV4 }) throw Invalid("no IPv4 Address; BitProxy needs one for the TUN interface")
++
++            val dnsEntries = splitList(iface["dns"])
++            val dns = dnsEntries.mapNotNull(IpAddress::parse)
++            if (dns.isEmpty()) throw Invalid("no DNS server address")
++            dnsEntries.filter { IpAddress.parse(it) == null }.forEach { warnings += "ignored DNS search domain \"$it\"" }
++
++            val mtu = iface.one("mtu")?.let { it.toIntOrNull()?.takeIf { v -> v in 576..65535 } ?: throw Invalid("MTU \"$it\" is out of range (576-65535)") }
++
++            val peers = sections["peer"].orEmpty().mapIndexedNotNull { index, p -> parsePeer(p, index + 1, warnings) }
++            if (peers.isEmpty()) throw Invalid("no usable [Peer] section (needs PublicKey and Endpoint)")
++
++            ParseResult.Ok(WireGuardConf(name, addresses, privateKey, dns, mtu, peers), warnings.map { "$name: $it" })
++        } catch (e: Invalid) {
++            error(name, e.message!!)
++        }
++    }
++
++    private fun parsePeer(p: Map<String, List<String>>, number: Int, warnings: MutableList<String>): WireGuardPeer? {
++        val publicKey = p.one("publickey")
++        val endpoint = p.one("endpoint")
++        if (publicKey == null || endpoint == null) {
++            // Same as conf-merger.py: such peers are skipped, not fatal.
++            warnings += "skipped peer $number (missing ${if (publicKey == null) "PublicKey" else "Endpoint"})"
++            return null
++        }
++        checkKey(publicKey, "PublicKey of peer $number")
++        val (host, port) = parseEndpoint(endpoint) ?: throw Invalid("Endpoint \"$endpoint\" of peer $number must be host:port or [IPv6]:port")
++        val allowedIps = splitList(p["allowedips"]).onEach { if (IpPrefix.parse(it) == null) throw Invalid("AllowedIPs \"$it\" of peer $number is not a valid IP range") }
++            .ifEmpty { DEFAULT_ALLOWED_IPS }
++        val psk = p.one("presharedkey")?.also { checkKey(it, "PresharedKey of peer $number") }
++        val keepalive = p.one("persistentkeepalive")?.let {
++            if (it.equals("off", ignoreCase = true)) {
++                null
++            } else {
++                it.toIntOrNull()?.takeIf { v -> v in 0..65535 } ?: throw Invalid("PersistentKeepalive \"$it\" of peer $number is out of range (0-65535)")
++            }
++        }
++        return WireGuardPeer(host, port, publicKey, allowedIps, psk, keepalive)
++    }
++
++    /** Accepts "1.2.3.4:51820", "[2001:db8::1]:51820" and "vpn.example.com:51820". */
++    internal fun parseEndpoint(value: String): Pair<String, Int>? {
++        val colon = value.lastIndexOf(':')
++        if (colon <= 0) return null
++        val port = value.substring(colon + 1).toIntOrNull()?.takeIf { it in 1..65535 } ?: return null
++        val hostPart = value.substring(0, colon)
++        val host = if (hostPart.startsWith("[") && hostPart.endsWith("]")) {
++            hostPart.substring(1, hostPart.length - 1).takeIf { IpAddress.parse(it)?.isV4 == false }
++        } else {
++            // A bare IPv6 address without brackets is ambiguous with the port, so reject it.
++            hostPart.takeIf { ':' !in it && (IpAddress.parse(it) != null || HOSTNAME.matches(it)) }
++        }
++        return host?.let { it to port }
++    }
++
++    @OptIn(ExperimentalEncodingApi::class)
++    private fun checkKey(key: String, what: String) {
++        val bytes = try {
++            Base64.Default.decode(key)
++        } catch (_: IllegalArgumentException) {
++            null
++        }
++        if (bytes?.size != 32) throw Invalid("$what is not a valid WireGuard key (expected 44 base64 characters)")
++    }
++
++    private fun Map<String, List<String>>.one(key: String) = get(key)?.firstOrNull()?.takeIf { it.isNotEmpty() }
++
++    private fun splitList(values: List<String>?) = values.orEmpty().flatMap { it.split(',') }.map { it.trim() }.filter { it.isNotEmpty() }
++
++    private fun error(name: String, message: String) = ParseResult.Error("$name: $message")
++}
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/wireguard/WireGuardConfTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/wireguard/WireGuardConfTest.kt
+new file mode 100644
+index 0000000..60af998
+--- /dev/null
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/wireguard/WireGuardConfTest.kt
+@@ -0,0 +1,189 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.wireguard
++
++import io.nekohasekai.sfa.bitproxy.net.IpAddress
++import io.nekohasekai.sfa.bitproxy.net.IpPrefix
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertNotNull
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Assert.fail
++import org.junit.Test
++
++// All keys below are random dummy values, never real WireGuard keys.
++private const val PRIV = "9Jg/mew3whp1WZOPQ8we6FK3XYfseOiCbCkxhdwejB4="
++private const val PUB = "x0g1ZPy9jFo8AWzgEeL45vKt+Wp2NA4vSZkoId4U9fo="
++private const val PUB2 = "kj2cMuzW1kK0ZX47HsnYx6FVYF3b+nD8Vy2MyVe+s6U="
++private const val PSK = "zeEvfqDziNiGxua0xnO/9M8HcuFjVVikxPegqgHmgEY="
++
++class WireGuardConfTest {
++    private fun ok(text: String, file: String = "Test.conf"): ParseResult.Ok {
++        val r = WireGuardConfParser.parse(text, file)
++        if (r is ParseResult.Error) fail("expected success, got: ${r.message}")
++        return r as ParseResult.Ok
++    }
++
++    private fun err(text: String, file: String = "Test.conf"): String {
++        val r = WireGuardConfParser.parse(text, file)
++        if (r is ParseResult.Ok) fail("expected error, got: ${r.conf}")
++        return (r as ParseResult.Error).message
++    }
++
++    private val proton = """
++        [Interface]
++        # Key for NL-FREE#1
++        # Bouncing = 1
++        # NetShield = 0
++        PrivateKey = $PRIV
++        Address = 10.2.0.2/32, 2a07:b944::2:2/128
++        DNS = 10.2.0.1, 2a07:b944::2:1
++
++        [Peer]
++        # NL-FREE#1
++        PublicKey = $PUB
++        AllowedIPs = 0.0.0.0/0, ::/0
++        Endpoint = 185.107.56.1:51820
++    """.trimIndent()
++
++    @Test fun protonExport() {
++        val c = ok(proton, "wg-NL-FREE-1.conf").conf
++        assertEquals("wg-NL-FREE-1", c.name)
++        assertEquals(PRIV, c.privateKey)
++        assertEquals("10.2.0.2/32", c.ipv4Address.toString())
++        assertEquals("2a07:b944::2:2/128", c.ipv6Address.toString())
++        assertEquals("10.2.0.1", c.ipv4Dns.toString())
++        assertNull(c.mtu)
++        val p = c.peers.single()
++        assertEquals("185.107.56.1", p.host)
++        assertEquals(51820, p.port)
++        assertEquals(listOf("0.0.0.0/0", "::/0"), p.allowedIps)
++        assertNull(p.presharedKey)
++        assertNull(p.persistentKeepalive)
++    }
++
++    @Test fun crlfAndBom() {
++        val c = ok(Char(0xFEFF) + proton.replace("\n", "\r\n")).conf
++        assertEquals(PRIV, c.privateKey)
++        assertEquals(1, c.peers.size)
++    }
++
++    @Test fun keysAreCaseInsensitiveAndRepeatedKeysAppend() {
++        val c = ok(
++            """
++            [interface]
++            privatekey=$PRIV
++            ADDRESS = 10.2.0.2/32
++            Address = fd00::2/128
++            dns = 10.2.0.1
++            DNS = 1.1.1.1 , ,
++            [PEER]
++            publickey = $PUB
++            endpoint = 1.2.3.4:51820
++            AllowedIPs = 0.0.0.0/1
++            AllowedIPs = 128.0.0.0/1
++            """.trimIndent(),
++        ).conf
++        assertEquals(listOf("10.2.0.2/32", "fd00::2/128"), c.addresses.map { it.toString() })
++        assertEquals(listOf("10.2.0.1", "1.1.1.1"), c.dns.map { it.toString() })
++        assertEquals(listOf("0.0.0.0/1", "128.0.0.0/1"), c.peers.single().allowedIps)
++    }
++
++    @Test fun optionalPeerFieldsAndMtu() {
++        val c = ok(
++            """
++            [Interface]
++            PrivateKey = $PRIV
++            Address = 10.8.0.5/24
++            DNS = 10.8.0.1
++            MTU = 1280
++            [Peer]
++            PublicKey = $PUB
++            PresharedKey = $PSK
++            PersistentKeepalive = 25
++            Endpoint = [2001:db8::1]:51820
++            [Peer]
++            PublicKey = $PUB2
++            PersistentKeepalive = off
++            Endpoint = vpn.example.com:443
++            """.trimIndent(),
++        ).conf
++        assertEquals(1280, c.mtu)
++        val (a, b) = c.peers
++        assertEquals("2001:db8::1", a.host)
++        assertEquals(PSK, a.presharedKey)
++        assertEquals(25, a.persistentKeepalive)
++        assertEquals(listOf("0.0.0.0/0", "::/0"), a.allowedIps) // default when missing
++        assertEquals("vpn.example.com", b.host)
++        assertEquals(443, b.port)
++        assertNull(b.persistentKeepalive)
++    }
++
++    @Test fun dnsSearchDomainsAreIgnoredWithWarning() {
++        val r = ok(proton.replace("DNS = 10.2.0.1, 2a07:b944::2:1", "DNS = 10.2.0.1, corp.example"))
++        assertEquals(listOf("10.2.0.1"), r.conf.dns.map { it.toString() })
++        assertTrue(r.warnings.single().contains("corp.example"))
++    }
++
++    @Test fun peerWithoutEndpointIsSkipped() {
++        val r = ok(proton + "\n[Peer]\nPublicKey = $PUB2\nAllowedIPs = 0.0.0.0/0\n")
++        assertEquals(1, r.conf.peers.size)
++        assertTrue(r.warnings.single().contains("peer 2"))
++    }
++
++    @Test fun commentsAfterValuesAreStripped() {
++        val c = ok(proton.replace("Endpoint = 185.107.56.1:51820", "Endpoint = 185.107.56.1:51820 # NL")).conf
++        assertEquals(51820, c.peers.single().port)
++    }
++
++    @Test fun invalidFilesGiveClearErrors() {
++        assertTrue(err("").contains("[Interface]"))
++        assertTrue(err("hello world\n\u0000\u0001garbage").contains("[Interface]"))
++        assertTrue(err(proton.lines().filterNot { it.startsWith("PrivateKey") }.joinToString("\n")).contains("missing PrivateKey"))
++        assertTrue(err(proton.replace(PRIV, "notakey")).contains("PrivateKey is not a valid"))
++        assertTrue(err(proton.replace(PUB, "AAAA")).contains("PublicKey of peer 1"))
++        assertTrue(err(proton.replace("10.2.0.2/32, ", "")).contains("no IPv4 Address"))
++        assertTrue(err(proton.replace("10.2.0.2/32", "10.2.0.300/32")).contains("10.2.0.300"))
++        assertTrue(err(proton.replace("DNS = 10.2.0.1, 2a07:b944::2:1", "")).contains("no DNS"))
++        assertTrue(err(proton.replace(":51820", ":99999")).contains("Endpoint"))
++        assertTrue(err(proton.replace("185.107.56.1:51820", "2001:db8::1:51820")).contains("Endpoint"))
++        assertTrue(err(proton.lines().takeWhile { !it.startsWith("[Peer]") }.joinToString("\n")).contains("no usable [Peer]"))
++    }
++
++    @Test fun mtuOutOfRange() {
++        val text = proton.replace("[Peer]", "MTU = 12\n\n[Peer]")
++        assertTrue(err(text).contains("MTU \"12\""))
++    }
++
++    @Test fun errorsNameTheFile() {
++        assertTrue(err("", "My Server.conf.txt").startsWith("My Server:"))
++    }
++
++    @Test fun toStringNeverLeaksKeys() {
++        val s = ok(proton.replace("[Peer]", "[Peer]\nPresharedKey = $PSK")).conf.toString()
++        assertFalse(PRIV in s)
++        assertFalse(PSK in s)
++    }
++
++    @Test fun ipParsing() {
++        for (ok in listOf("0.0.0.0", "255.255.255.255", "::", "::1", "2a07:b944::2:2", "fe80::1:2:3:4:5", "1:2:3:4:5:6:7:8", "::ffff:1.2.3.4", "2001:DB8::")) {
++            assertNotNull(ok, IpAddress.parse(ok))
++        }
++        for (bad in listOf("", "1.2.3", "1.2.3.4.5", "256.1.1.1", "01.2.3.4", "1.2.3.-4", ":::", "1::2::3", "1:2:3:4:5:6:7:8:9", "12345::", "g::1", "fe80::1%wlan0", "host.name")) {
++            assertNull(bad, IpAddress.parse(bad))
++        }
++        assertEquals(IpAddress.parse("2a07:b944:0:0:0:0:2:2"), IpAddress.parse("2a07:b944::2:2"))
++        assertEquals(IpAddress.parse("::ffff:102:304"), IpAddress.parse("::ffff:1.2.3.4"))
++        assertEquals(32, IpPrefix.parse("10.0.0.1")!!.prefixLength)
++        assertEquals(128, IpPrefix.parse("::1")!!.prefixLength)
++        assertNull(IpPrefix.parse("10.0.0.1/33"))
++        assertNull(IpPrefix.parse("::1/129"))
++        assertNull(IpPrefix.parse("10.0.0.1/"))
++    }
++
++    @Test fun nameFromFileName() {
++        assertEquals("NL-FREE#1", WireGuardConfParser.nameFromFileName("NL-FREE#1.conf"))
++        assertEquals("wg", WireGuardConfParser.nameFromFileName("/sdcard/Download/wg.conf.txt"))
++        assertEquals("wg", WireGuardConfParser.nameFromFileName("wg.CONF"))
++    }
++}
+-- 
+2.55.0
+

@@ -1,0 +1,241 @@
+From a1a45eefa4eb5ba06d0eb8a316b0eac4e3470da5 Mon Sep 17 00:00:00 2001
+From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 01:36:12 +0530
+Subject: [PATCH 28/35] bitproxy: 'Fastest (auto)' in the server card with
+ check interval
+
+The dashboard server card gets a 'Fastest (auto)' option (sing-box
+urltest over the servers sharing the tunnel address) next to the
+individual servers; while it is selected, 'Check every' picks the test
+interval (1, 3, 5, 10 or 30 min, default 10). The card shows which
+server is in use and its latency, or that no server answers. Picking a
+specific server switches back to manual.
+---
+ .../sfa/bitproxy/BitProxyApplier.kt           |  2 +-
+ .../nekohasekai/sfa/bitproxy/BitProxyPrefs.kt |  4 +
+ .../sfa/bitproxy/config/ConfigGenerator.kt    |  5 +-
+ .../sfa/bitproxy/ui/DashboardServersCard.kt   | 91 ++++++++++++++++---
+ .../bitproxy/config/ConfigGeneratorTest.kt    |  4 +-
+ 5 files changed, 89 insertions(+), 17 deletions(-)
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+index cb93e51..589121e 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+@@ -61,7 +61,7 @@ object BitProxyApplier {
+         }
+         val servers = BitProxyStore.servers()
+         val routes = AppResolver.scan().routes(BitProxyPrefs.apps)
+-        var result = when (val r = ConfigGenerator.generate(GeneratorInput(servers.map { it.conf }, BitProxyPrefs.selectedServer, routes, ipv6, BitProxyPrefs.autoPick, BitProxyPrefs.vpnDomains, BitProxyPrefs.trustedWifi))) {
++        var result = when (val r = ConfigGenerator.generate(GeneratorInput(servers.map { it.conf }, BitProxyPrefs.selectedServer, routes, ipv6, BitProxyPrefs.autoPick, BitProxyPrefs.autoPickMinutes, BitProxyPrefs.vpnDomains, BitProxyPrefs.trustedWifi))) {
+             is GenerateResult.Error -> return Outcome.Failed(r.message)
+             is GenerateResult.Ok -> r
+         }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+index a8f5a12..e15dcde 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+@@ -69,6 +69,10 @@ object BitProxyPrefs {
+ 
+     fun setTileApp(slot: Int, key: AppKey?) = prefs.edit { if (key == null) remove("tile_$slot") else putString("tile_$slot", key.toString()) }
+ 
++    var autoPickMinutes: Int
++        get() = prefs.getInt("auto_pick_minutes", 10)
++        set(value) = prefs.edit { putInt("auto_pick_minutes", value) }
++
+     var autoPick: Boolean
+         get() = prefs.getBoolean("auto_pick", false)
+         set(value) = prefs.edit { putBoolean("auto_pick", value) }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
+index 2d78a53..1840158 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
+@@ -38,6 +38,8 @@ data class GeneratorInput(
+     val ipv6: Boolean = false,
+     /** "VPN" becomes a urltest group that picks the fastest server instead of a manual selector. */
+     val autoPick: Boolean = false,
++    /** How often auto-pick re-tests the servers; each test wakes the radio for every server. */
++    val autoPickMinutes: Int = 10,
+     /** Domains (and their subdomains) that always go through the VPN, also for Direct apps. */
+     val vpnDomains: List<String> = emptyList(),
+     /** Wi-Fi networks (SSIDs) where every app goes Direct, except blocked apps. */
+@@ -189,8 +191,7 @@ object ConfigGenerator {
+                     put("tag", VPN)
+                     put("outbounds", buildJsonArray { group.forEach { add(tags[it]) } })
+                     if (!input.autoPick) put("default", tags[selectedIndex])
+-                    // Each test wakes the radio for every server; 10 min instead of 3 saves battery.
+-                    if (input.autoPick) put("interval", "10m")
++                    if (input.autoPick) put("interval", "${input.autoPickMinutes.coerceIn(1, 60)}m")
+                     put("interrupt_exist_connections", true)
+                 }
+                 // A direct outbound must not have "detour" ("detour is not supported in direct context").
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DashboardServersCard.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DashboardServersCard.kt
+index b8f6d14..bf29779 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DashboardServersCard.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DashboardServersCard.kt
+@@ -21,11 +21,15 @@ import androidx.compose.material3.ListItem
+ import androidx.compose.material3.ListItemDefaults
+ import androidx.compose.material3.MaterialTheme
+ import androidx.compose.material3.RadioButton
++import androidx.compose.material3.SegmentedButton
++import androidx.compose.material3.SegmentedButtonDefaults
++import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+ import androidx.compose.material3.Text
+ import androidx.compose.runtime.Composable
+ import androidx.compose.runtime.DisposableEffect
+ import androidx.compose.runtime.LaunchedEffect
+ import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
+ import androidx.compose.runtime.mutableStateOf
+ import androidx.compose.runtime.remember
+ import androidx.compose.runtime.rememberCoroutineScope
+@@ -66,13 +70,17 @@ private class GroupDelays : CommandClient.Handler {
+     }
+ }
+ 
+-/** Pick the active server and see which servers answer, without opening Settings. */
++private val AUTO_PICK_MINUTES = listOf(1, 3, 5, 10, 30)
++
++/** Pick the active server (or "Fastest") and see which servers answer, without opening Settings. */
+ @Composable
+ fun DashboardServersCard(serviceStatus: Status) {
+     val scope = rememberCoroutineScope()
+     val running = serviceStatus == Status.Started
+     var servers by remember { mutableStateOf<List<StoredServer>?>(null) }
+     var chosen by remember { mutableStateOf(BitProxyPrefs.selectedServer) }
++    var auto by remember { mutableStateOf(BitProxyPrefs.autoPick) }
++    var minutes by remember { mutableIntStateOf(BitProxyPrefs.autoPickMinutes) }
+     var testing by remember { mutableStateOf(false) }
+     var tested by remember { mutableStateOf(false) } // after a test, no delay means "no response"
+     var status by remember { mutableStateOf<String?>(null) }
+@@ -125,7 +133,7 @@ fun DashboardServersCard(serviceStatus: Status) {
+                     Text("Server", style = MaterialTheme.typography.titleMedium)
+                     val activeDelay = handler.delays[active.tag]?.takeIf { it > 0 }?.let { " · $it ms" } ?: ""
+                     Text(
+-                        status ?: ((if (BitProxyPrefs.autoPick) "Auto-pick: " else "") + active.tag + activeDelay),
++                        status ?: ((if (auto) "Fastest: " else "") + active.tag + activeDelay),
+                         style = MaterialTheme.typography.bodySmall,
+                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                     )
+@@ -142,16 +150,78 @@ fun DashboardServersCard(serviceStatus: Status) {
+                 )
+             }
+             if (!collapsed) {
++                fun applyNow(message: String) {
++                    status = message
++                    scope.launch {
++                        status = when (val o = BitProxyApplier.apply(running)) {
++                            is BitProxyApplier.Outcome.Applied -> null
++                            is BitProxyApplier.Outcome.Failed -> "Not applied: ${o.message}"
++                        }
++                        handler.selected = null
++                    }
++                }
++                val inUse = handler.selected?.takeIf { it.isNotBlank() }
++                ListItem(
++                    headlineContent = { Text("Fastest (auto)") },
++                    supportingContent = {
++                        val d = inUse?.let { handler.delays[it] }?.takeIf { it > 0 }?.let { " · $it ms" } ?: ""
++                        Text(
++                            when {
++                                !auto || !running -> "Tests the servers and uses the fastest one"
++                                inUse != null && d.isNotEmpty() -> "Using $inUse$d"
++                                tested -> "No server answers right now"
++                                else -> "Testing…"
++                            },
++                            style = MaterialTheme.typography.bodySmall,
++                            color = MaterialTheme.colorScheme.onSurfaceVariant,
++                        )
++                    },
++                    leadingContent = { RadioButton(selected = auto, onClick = null) },
++                    modifier = Modifier.clickable(enabled = !auto) {
++                        auto = true
++                        BitProxyPrefs.autoPick = true
++                        applyNow("Switching to fastest…")
++                    },
++                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
++                )
++                if (auto) {
++                    Column(Modifier.padding(start = 72.dp, end = 16.dp, bottom = 8.dp)) {
++                        Text("Check every", style = MaterialTheme.typography.labelMedium)
++                        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
++                            AUTO_PICK_MINUTES.forEachIndexed { i, m ->
++                                SegmentedButton(
++                                    selected = minutes == m,
++                                    onClick = {
++                                        if (minutes != m) {
++                                            minutes = m
++                                            BitProxyPrefs.autoPickMinutes = m
++                                            applyNow("Checking every $m min…")
++                                        }
++                                    },
++                                    shape = SegmentedButtonDefaults.itemShape(i, AUTO_PICK_MINUTES.size),
++                                    icon = {},
++                                    label = { Text("${m}m", style = MaterialTheme.typography.labelSmall) },
++                                )
++                            }
++                        }
++                        Text(
++                            "More often switches faster when a server slows down, but uses more battery.",
++                            style = MaterialTheme.typography.bodySmall,
++                            color = MaterialTheme.colorScheme.onSurfaceVariant,
++                        )
++                    }
++                }
+                 for (server in list) {
+                     val delayMs = handler.delays[server.tag]
+                     val latency = when {
+                         !running -> "Start the VPN to test"
+-                        delayMs != null && delayMs > 0 -> "$delayMs ms"
++                        delayMs != null && delayMs > 0 -> "$delayMs ms" + if (auto && server.tag == inUse) " · in use" else ""
+                         delayMs == null -> "Needs Apply (other tunnel address)"
+                         tested -> "No response"
+                         else -> "Not tested yet"
+                     }
+                     val down = running && tested && (delayMs == null || delayMs <= 0)
++                    val selectedHere = !auto && server.tag == active.tag
+                     ListItem(
+                         headlineContent = { Text(server.tag) },
+                         supportingContent = {
+@@ -161,18 +231,13 @@ fun DashboardServersCard(serviceStatus: Status) {
+                                 color = if (down) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                             )
+                         },
+-                        leadingContent = { RadioButton(selected = server.tag == active.tag, onClick = null) },
+-                        modifier = Modifier.clickable(enabled = server.tag != active.tag) {
++                        leadingContent = { RadioButton(selected = selectedHere, onClick = null) },
++                        modifier = Modifier.clickable(enabled = !selectedHere) {
+                             chosen = server.tag
++                            auto = false
++                            BitProxyPrefs.autoPick = false
+                             BitProxyPrefs.selectedServer = server.tag
+-                            status = "Switching to ${server.tag}…"
+-                            scope.launch {
+-                                status = when (val o = BitProxyApplier.apply(running)) {
+-                                    is BitProxyApplier.Outcome.Applied -> null
+-                                    is BitProxyApplier.Outcome.Failed -> "Not switched: ${o.message}"
+-                                }
+-                                handler.selected = null
+-                            }
++                            applyNow("Switching to ${server.tag}…")
+                         },
+                         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                     )
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
+index a31694c..e1cd7b3 100644
+--- a/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
+@@ -166,7 +166,9 @@ class ConfigGeneratorTest {
+         val vpn = r.config["outbounds"]!!.jsonArray[0].jsonObject
+         assertEquals("urltest", vpn["type"]!!.jsonPrimitive.content)
+         assertFalse("default" in vpn) // urltest has no default
+-        assertEquals("10m", vpn["interval"]!!.jsonPrimitive.content)
++        assertEquals("10m", vpn["interval"]!!.jsonPrimitive.content) // default
++        val every3 = ok(GeneratorInput(servers("two-servers"), null, twoServerApps, autoPick = true, autoPickMinutes = 3))
++        assertEquals("3m", every3.config["outbounds"]!!.jsonArray[0].jsonObject["interval"]!!.jsonPrimitive.content)
+         assertEquals(listOf("nl-free#1", "us-free-2"), vpn["outbounds"]!!.jsonArray.map { it.jsonPrimitive.content })
+     }
+ 
+-- 
+2.55.0
+

@@ -1,0 +1,305 @@
+From 5c13116e8b691c5167a27edf043cbc6bb34e9bf0 Mon Sep 17 00:00:00 2001
+From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 00:38:10 +0530
+Subject: [PATCH 13/35] bitproxy: diagnostics screen with redacted log export
+
+Settings > BitProxy > Diagnostics shows VPN state, Always-on / Block,
+tunnel and phone DNS address, server group, remote DNS and strategy,
+rule count, IPv6 mode (applied and detected), clone detection, upstream
+per-app proxy state, last Apply result and versions. 'Export log'
+shares the report, the applied config and this app's recent logcat with
+all WireGuard private and preshared keys masked (unit tested).
+---
+ .../io/nekohasekai/sfa/bitproxy/Redactor.kt   |  17 ++
+ .../sfa/bitproxy/ui/BitProxyScreen.kt         |  11 ++
+ .../sfa/bitproxy/ui/DiagnosticsScreen.kt      | 176 ++++++++++++++++++
+ .../nekohasekai/sfa/bitproxy/RedactorTest.kt  |  34 ++++
+ 4 files changed, 238 insertions(+)
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/Redactor.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DiagnosticsScreen.kt
+ create mode 100644 app/src/test/java/io/nekohasekai/sfa/bitproxy/RedactorTest.kt
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/Redactor.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/Redactor.kt
+new file mode 100644
+index 0000000..6e1462a
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/Redactor.kt
+@@ -0,0 +1,17 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy
++
++/** Removes WireGuard private and preshared keys from anything that leaves the app. */
++object Redactor {
++    private const val MASK = "[REDACTED]"
++    private val JSON_KEY = Regex(""""(private_key|pre_shared_key)"\s*:\s*"[^"]*"""")
++    private val CONF_KEY = Regex("""(?im)^(\s*(?:PrivateKey|PresharedKey)\s*=\s*).*$""")
++
++    /** [secrets]: known key values (from the imported configs), masked wherever they appear. */
++    fun redact(text: String, secrets: Collection<String> = emptyList()): String {
++        var out = JSON_KEY.replace(text) { """"${it.groupValues[1]}": "$MASK"""" }
++        out = CONF_KEY.replace(out) { it.groupValues[1] + MASK }
++        for (s in secrets) if (s.length >= 16) out = out.replace(s, MASK)
++        return out
++    }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+index 52114fe..f3a12d6 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+@@ -17,6 +17,7 @@ import androidx.compose.foundation.verticalScroll
+ import androidx.compose.material.icons.Icons
+ import androidx.compose.material.icons.automirrored.filled.ArrowBack
+ import androidx.compose.material.icons.outlined.Apps
++import androidx.compose.material.icons.outlined.BugReport
+ import androidx.compose.material.icons.outlined.Delete
+ import androidx.compose.material.icons.outlined.FileOpen
+ import androidx.compose.material.icons.outlined.Shield
+@@ -74,6 +75,9 @@ fun NavGraphBuilder.bitProxyRoutes(navController: NavController, serviceStatus:
+     composable("settings/bitproxy/apps", enterTransition = enter, popExitTransition = exit) {
+         AppPickerScreen(navController)
+     }
++    composable("settings/bitproxy/diagnostics", enterTransition = enter, popExitTransition = exit) {
++        DiagnosticsScreen(navController, serviceStatus)
++    }
+ }
+ 
+ /** Hook: entry card at the top of the upstream Settings screen. */
+@@ -224,6 +228,13 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+                 modifier = Modifier.clickable { navController.navigate("settings/bitproxy/apps") },
+                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+             )
++            ListItem(
++                headlineContent = { Text("Diagnostics") },
++                supportingContent = { Text("Tunnel, DNS, IPv6, Always-on, last Apply, log export") },
++                leadingContent = { Icon(Icons.Outlined.BugReport, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
++                modifier = Modifier.clickable { navController.navigate("settings/bitproxy/diagnostics") },
++                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
++            )
+         }
+         Card(
+             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DiagnosticsScreen.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DiagnosticsScreen.kt
+new file mode 100644
+index 0000000..ba2d47f
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DiagnosticsScreen.kt
+@@ -0,0 +1,176 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.ui
++
++import android.content.Context
++import android.content.Intent
++import android.os.Build
++import android.os.Process
++import androidx.compose.foundation.background
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.text.selection.SelectionContainer
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.automirrored.filled.ArrowBack
++import androidx.compose.material.icons.outlined.Share
++import androidx.compose.material3.Button
++import androidx.compose.material3.Card
++import androidx.compose.material3.CardDefaults
++import androidx.compose.material3.ExperimentalMaterial3Api
++import androidx.compose.material3.Icon
++import androidx.compose.material3.IconButton
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.material3.TopAppBar
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.platform.LocalContext
++import androidx.compose.ui.text.font.FontFamily
++import androidx.compose.ui.unit.dp
++import androidx.core.content.FileProvider
++import androidx.navigation.NavController
++import io.nekohasekai.libbox.Libbox
++import io.nekohasekai.sfa.BuildConfig
++import io.nekohasekai.sfa.bitproxy.AppResolver
++import io.nekohasekai.sfa.bitproxy.BitProxyPrefs
++import io.nekohasekai.sfa.bitproxy.BitProxyServiceHooks
++import io.nekohasekai.sfa.bitproxy.BitProxyStore
++import io.nekohasekai.sfa.bitproxy.Ipv6Watcher
++import io.nekohasekai.sfa.bitproxy.Redactor
++import io.nekohasekai.sfa.compose.topbar.LocalScaffoldPadding
++import io.nekohasekai.sfa.compose.topbar.OverrideTopBar
++import io.nekohasekai.sfa.constant.Status
++import io.nekohasekai.sfa.database.ProfileManager
++import io.nekohasekai.sfa.database.Settings
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++import kotlinx.serialization.json.Json
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.jsonArray
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import java.io.File
++import java.util.concurrent.TimeUnit
++
++/** Everything worth knowing when something doesn't work. Never contains key material. */
++private suspend fun collectReport(serviceStatus: Status): String = withContext(Dispatchers.IO) {
++    val lines = mutableListOf<Pair<String, String>>()
++    fun add(k: String, v: Any?) = lines.add(k to (v?.toString() ?: "-"))
++
++    add("VPN", serviceStatus.name)
++    val ao = BitProxyServiceHooks.alwaysOn(serviceStatus == Status.Started)
++    add("Always-on / Block", ao?.let { "${if (it.alwaysOn) "on" else "off"} / ${if (it.lockdown) "on" else "off"}" } ?: "unknown (Android 10+, VPN must have run)")
++
++    val profile = ProfileManager.get(BitProxyPrefs.profileId)
++    add("BitProxy profile", profile?.let { "${it.name} (id ${it.id})" } ?: "not created yet (tap Apply)")
++    add("Selected profile is BitProxy", Settings.selectedProfile == BitProxyPrefs.profileId)
++    val config = profile?.let { runCatching { Json.parseToJsonElement(File(it.typed.path).readText()) as JsonObject }.getOrNull() }
++    if (config != null) {
++        val tun = config["inbounds"]?.jsonArray?.firstOrNull()?.jsonObject
++        val tunAddrs = tun?.get("address")?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty()
++        add("Tunnel address", tunAddrs.joinToString())
++        add(
++            "Phone DNS address",
++            tunAddrs.firstOrNull()?.substringBefore('/')?.let { ip ->
++                ip.split('.').takeIf { it.size == 4 }?.let { p -> "${p[0]}.${p[1]}.${p[2]}.${p[3].toInt() + 1}" }
++            },
++        )
++        val vpn = config["outbounds"]?.jsonArray?.firstOrNull()?.jsonObject
++        add("Server group", "${vpn?.get("type")?.jsonPrimitive?.content}: ${vpn?.get("outbounds")?.jsonArray?.joinToString { it.jsonPrimitive.content }}")
++        add("Default server", vpn?.get("default")?.jsonPrimitive?.content ?: "(auto-pick)")
++        val dns = config["dns"]?.jsonObject
++        add("Remote DNS", dns?.get("servers")?.jsonArray?.firstOrNull { it.jsonObject["tag"]?.jsonPrimitive?.content == "remote" }?.jsonObject?.get("server")?.jsonPrimitive?.content)
++        add("DNS strategy", dns?.get("strategy")?.jsonPrimitive?.content)
++        add("Per-app rules", config["route"]?.jsonObject?.get("rules")?.jsonArray?.count { "user_id" in it.jsonObject })
++    }
++    add("IPv6 mode (applied)", BitProxyPrefs.appliedIpv6)
++    add("Underlying network has IPv6", Ipv6Watcher.hasIpv6 ?: "not watching (VPN off)")
++    add("Saved app choices", BitProxyPrefs.apps.size)
++    val scan = AppResolver.scan()
++    add("Clone detection (pm -U)", if (scan.pmAvailable) "works" else "unavailable, use manual clones")
++    add("Clones / other users seen", scan.uids.keys.filter { it.userId != scan.currentUser }.map { it.userId }.distinct().sorted().ifEmpty { listOf("none") }.joinToString())
++    add("Servers imported", BitProxyStore.servers().joinToString { it.tag }.ifEmpty { "none" })
++    add("Upstream per-app proxy", if (Settings.perAppProxyEnabled) "ON (should be off)" else "off")
++    add("Last Apply", BitProxyPrefs.lastApply)
++    add("App", "${BuildConfig.APPLICATION_ID} ${BuildConfig.VERSION_NAME}")
++    add("sing-box", runCatching { Libbox.version() }.getOrNull())
++    add("Android", "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.MANUFACTURER} ${Build.MODEL}")
++    lines.joinToString("\n") { (k, v) -> "$k: $v" }
++}
++
++/** Report + applied config + this app's recent logcat, with every private/preshared key masked. */
++private suspend fun exportLog(context: Context, report: String): File = withContext(Dispatchers.IO) {
++    val secrets = BitProxyStore.servers().flatMap { s -> listOf(s.conf.privateKey) + s.conf.peers.mapNotNull { it.presharedKey } }
++    val config = ProfileManager.get(BitProxyPrefs.profileId)?.let { runCatching { File(it.typed.path).readText() }.getOrNull() } ?: "(none)"
++    val logcat = runCatching {
++        val p = ProcessBuilder("logcat", "-d", "-v", "time", "--pid=${Process.myPid()}", "-t", "2000").redirectErrorStream(true).start()
++        val text = p.inputStream.bufferedReader().readText()
++        p.waitFor(10, TimeUnit.SECONDS)
++        text
++    }.getOrElse { "logcat failed: ${it.message}" }
++    val text = "== BitProxy diagnostics ==\n$report\n\n== Applied config ==\n$config\n\n== Log ==\n$logcat"
++    File(context.cacheDir, "bitproxy-diagnostics.txt").apply { writeText(Redactor.redact(text, secrets)) }
++}
++
++@OptIn(ExperimentalMaterial3Api::class)
++@Composable
++fun DiagnosticsScreen(navController: NavController, serviceStatus: Status) {
++    OverrideTopBar {
++        TopAppBar(
++            title = { Text("Diagnostics") },
++            navigationIcon = {
++                IconButton(onClick = { navController.navigateUp() }) {
++                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
++                }
++            },
++        )
++    }
++    val context = LocalContext.current
++    val scope = rememberCoroutineScope()
++    var report by remember { mutableStateOf("Collecting…") }
++    LaunchedEffect(serviceStatus) { report = collectReport(serviceStatus) }
++
++    val scaffoldPadding = LocalScaffoldPadding.current
++    Column(
++        modifier = Modifier
++            .fillMaxSize()
++            .background(MaterialTheme.colorScheme.surface)
++            .verticalScroll(rememberScrollState())
++            .padding(top = scaffoldPadding.calculateTopPadding() + 8.dp, bottom = scaffoldPadding.calculateBottomPadding() + 8.dp)
++            .padding(horizontal = 16.dp),
++    ) {
++        Card(
++            modifier = Modifier.fillMaxWidth(),
++            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
++        ) {
++            SelectionContainer {
++                Text(report, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(16.dp))
++            }
++        }
++        Button(
++            modifier = Modifier.padding(vertical = 16.dp),
++            onClick = {
++                scope.launch {
++                    val file = exportLog(context, report)
++                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.cache", file)
++                    val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_STREAM, uri)
++                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
++                    context.startActivity(Intent.createChooser(send, "Export diagnostics"))
++                }
++            },
++        ) {
++            Icon(Icons.Outlined.Share, contentDescription = null)
++            Text("  Export log (keys removed)")
++        }
++    }
++}
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/RedactorTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/RedactorTest.kt
+new file mode 100644
+index 0000000..fd40ddf
+--- /dev/null
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/RedactorTest.kt
+@@ -0,0 +1,34 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy
++
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class RedactorTest {
++    private val priv = "9Jg/mew3whp1WZOPQ8we6FK3XYfseOiCbCkxhdwejB4=" // dummy
++    private val psk = "zeEvfqDziNiGxua0xnO/9M8HcuFjVVikxPegqgHmgEY=" // dummy
++    private val pub = "x0g1ZPy9jFo8AWzgEeL45vKt+Wp2NA4vSZkoId4U9fo=" // dummy, public: may stay
++
++    @Test fun jsonConfig() {
++        val json = """{"private_key": "$priv", "peers":[{"public_key":"$pub","pre_shared_key" : "$psk"}]}"""
++        val out = Redactor.redact(json)
++        assertFalse(priv in out)
++        assertFalse(psk in out)
++        assertTrue(pub in out)
++        assertTrue(""""private_key": "[REDACTED]"""" in out)
++    }
++
++    @Test fun confFile() {
++        val out = Redactor.redact("[Interface]\nPrivateKey = $priv\n[Peer]\npresharedkey=$psk\nPublicKey = $pub\n")
++        assertFalse(priv in out)
++        assertFalse(psk in out)
++        assertTrue("PrivateKey = [REDACTED]" in out)
++        assertTrue(pub in out)
++    }
++
++    @Test fun knownSecretsAnywhere() {
++        assertEquals("log: key=[REDACTED] end", Redactor.redact("log: key=$priv end", listOf(priv)))
++    }
++}
+-- 
+2.55.0
+

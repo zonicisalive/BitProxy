@@ -1,0 +1,905 @@
+From 1c9cbc784f76d9cbf1e112c2855be625d41ed467 Mon Sep 17 00:00:00 2001
+From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
+Date: Thu, 24 Sep 2026 23:47:06 +0530
+Subject: [PATCH 04/35] bitproxy: sing-box config generator with golden tests
+
+Builds the config that reference/conf-merger.py produced: one wireguard
+endpoint per server, VPN selector, per-app/clone selectors routed by
+user_id, hijack-dns, remote DNS through the VPN. On top of the script:
+TUN address always follows the selected server (servers with another
+tunnel address are left out and reported), DNS/broadcast check for the
+/24, only VPN-mode apps use remote DNS, unique outbound tags, and the
+automatic IPv6 mode. Golden tests compare against the script's real
+output (golden/regenerate.sh).
+---
+ .../sfa/bitproxy/config/ConfigGenerator.kt    | 243 ++++++++++++++++++
+ .../bitproxy/config/ConfigGeneratorTest.kt    | 145 +++++++++++
+ .../golden/edge-cases/WG.conf.txt.wgtest      |   8 +
+ .../bitproxy/golden/edge-cases/expected.json  | 136 ++++++++++
+ .../bitproxy/golden/edge-cases/pm.txt         |   1 +
+ .../bitproxy/golden/edge-cases/wg.conf.wgtest |  16 ++
+ .../resources/bitproxy/golden/regenerate.sh   |  12 +
+ .../golden/two-servers/NL-FREE#1.conf.wgtest  |  11 +
+ .../golden/two-servers/US FREE 2.conf.wgtest  |   9 +
+ .../bitproxy/golden/two-servers/expected.json | 211 +++++++++++++++
+ .../bitproxy/golden/two-servers/pm.txt        |   4 +
+ 11 files changed, 796 insertions(+)
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
+ create mode 100644 app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
+ create mode 100644 app/src/test/resources/bitproxy/golden/edge-cases/WG.conf.txt.wgtest
+ create mode 100644 app/src/test/resources/bitproxy/golden/edge-cases/expected.json
+ create mode 100644 app/src/test/resources/bitproxy/golden/edge-cases/pm.txt
+ create mode 100644 app/src/test/resources/bitproxy/golden/edge-cases/wg.conf.wgtest
+ create mode 100755 app/src/test/resources/bitproxy/golden/regenerate.sh
+ create mode 100644 app/src/test/resources/bitproxy/golden/two-servers/NL-FREE#1.conf.wgtest
+ create mode 100644 app/src/test/resources/bitproxy/golden/two-servers/US FREE 2.conf.wgtest
+ create mode 100644 app/src/test/resources/bitproxy/golden/two-servers/expected.json
+ create mode 100644 app/src/test/resources/bitproxy/golden/two-servers/pm.txt
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
+new file mode 100644
+index 0000000..a6d15e8
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
+@@ -0,0 +1,243 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.config
++
++import io.nekohasekai.sfa.bitproxy.net.IpAddress
++import io.nekohasekai.sfa.bitproxy.wireguard.WireGuardConf
++import kotlinx.serialization.json.Json
++import kotlinx.serialization.json.JsonArray
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.JsonPrimitive
++import kotlinx.serialization.json.add
++import kotlinx.serialization.json.addJsonObject
++import kotlinx.serialization.json.buildJsonArray
++import kotlinx.serialization.json.buildJsonObject
++import kotlinx.serialization.json.put
++import kotlinx.serialization.json.putJsonArray
++import kotlinx.serialization.json.putJsonObject
++
++/** One switch row: an app in one Android user (main, clone, profile), with its live UIDs. */
++data class AppRoute(
++    val label: String,
++    val packageName: String,
++    val uids: List<Int>,
++    val viaVpn: Boolean,
++)
++
++data class GeneratorInput(
++    /** Parsed configs in display order; endpoint tags are derived from their names. */
++    val servers: List<WireGuardConf>,
++    /** Endpoint tag of the selected server; null or unknown = first server. */
++    val selectedTag: String?,
++    val apps: List<AppRoute>,
++    /** True when the underlying network has global IPv6 (automatic IPv6 mode). */
++    val ipv6: Boolean = false,
++)
++
++sealed interface GenerateResult {
++    data class Ok(
++        val config: JsonObject,
++        val selectedTag: String,
++        val tunAddresses: List<String>,
++        val dnsServer: String,
++        val ipv6: Boolean,
++        /** Servers left out of the VPN group because their tunnel address differs from the selected one. */
++        val otherAddressServers: List<String>,
++        val appRuleCount: Int,
++        val warnings: List<String>,
++    ) : GenerateResult {
++        val json: String get() = PRETTY.encodeToString(JsonObject.serializer(), config)
++    }
++
++    data class Error(val message: String) : GenerateResult
++}
++
++private val PRETTY = Json { prettyPrint = true }
++
++/**
++ * Builds the sing-box config that reference/conf-merger.py produced, with the
++ * hard-won rules from the phone baked in (see comments). Pure function: no Android APIs.
++ */
++object ConfigGenerator {
++    const val VPN = "VPN"
++    const val DIRECT = "Direct"
++    private const val TUN_MTU = 1400 // default 9000 made forwarded pages load slowly
++
++    /** Same as the script: lowercase, spaces to dashes, "-2", "-3"... for duplicates. */
++    fun endpointTags(servers: List<WireGuardConf>): List<String> {
++        val used = mutableSetOf<String>()
++        return servers.map { conf ->
++            val tag = conf.name.lowercase().replace(" ", "-")
++            var unique = tag
++            var n = 2
++            while (unique in used) unique = "$tag-${n++}"
++            used += unique
++            unique
++        }
++    }
++
++    fun generate(input: GeneratorInput): GenerateResult {
++        if (input.servers.isEmpty()) return GenerateResult.Error("No WireGuard servers imported")
++        val tags = endpointTags(input.servers)
++        val selectedIndex = tags.indexOf(input.selectedTag).takeIf { it >= 0 } ?: 0
++        val selected = input.servers[selectedIndex]
++        val warnings = mutableListOf<String>()
++
++        // sing-box forwards TUN packets into WireGuard without rewriting the source IP,
++        // so the TUN address MUST equal the selected server's tunnel address. Servers with
++        // a different address would silently drop traffic, so they stay out of this config.
++        val tunIp = selected.ipv4Address.address
++        val group = input.servers.indices.filter { input.servers[it].ipv4Address.address == tunIp }
++        val others = input.servers.indices.filter { it !in group }.map { tags[it] }
++        if (others.isNotEmpty()) {
++            warnings += "Servers with a different tunnel address are not in the VPN group (select one to switch): ${others.joinToString()}"
++        }
++
++        // /24, not /30: sing-box gives the phone the next IP as DNS server, which must be
++        // neither the network nor the broadcast address.
++        val host = tunIp.bytes[3].toInt() and 0xff
++        if (host == 0 || host >= 254) {
++            return GenerateResult.Error("Tunnel address $tunIp can't be used: its DNS address would be the network or broadcast address of the /24")
++        }
++        val tunAddresses = mutableListOf("$tunIp/24")
++        val v6 = selected.ipv6Address
++        val useIpv6 = input.ipv6 && v6 != null
++        if (input.ipv6 && v6 == null) warnings += "Network has IPv6 but ${tags[selectedIndex]} has no IPv6 address; staying IPv4-only"
++        if (useIpv6) tunAddresses += "${v6!!.address}/126"
++
++        val dnsServer: IpAddress = selected.ipv4Dns!! // the parser rejects configs without DNS
++
++        // Tags must be unique across all outbounds/endpoints.
++        val usedTags = (tags + VPN + DIRECT).toMutableSet()
++        val routes = input.apps.filter { it.uids.isNotEmpty() }.map { app ->
++            var tag = app.label
++            if (tag in usedTags) tag = "${app.label} (${app.packageName})"
++            var n = 2
++            while (tag in usedTags) tag = "${app.label} (${app.packageName}) ${n++}"
++            usedTags += tag
++            tag to app
++        }
++        val vpnUids = routes.filter { it.second.viaVpn }.flatMap { it.second.uids }.distinct().sorted()
++
++        val config = buildJsonObject {
++            putJsonObject("log") { put("level", "warn") }
++            putJsonObject("dns") {
++                put("strategy", if (useIpv6) "prefer_ipv4" else "ipv4_only")
++                putJsonArray("servers") {
++                    addJsonObject {
++                        put("type", "local")
++                        put("tag", "local")
++                    }
++                    addJsonObject {
++                        put("type", "udp")
++                        put("tag", "remote")
++                        put("server", dnsServer.text)
++                        put("detour", VPN)
++                    }
++                }
++                // Only VPN apps resolve through the tunnel, so Direct apps keep DNS when the server is down.
++                putJsonArray("rules") {
++                    if (vpnUids.isNotEmpty()) {
++                        addJsonObject {
++                            put("user_id", intArray(vpnUids))
++                            put("server", "remote")
++                        }
++                    }
++                }
++                put("final", "local")
++            }
++            putJsonArray("inbounds") {
++                addJsonObject {
++                    put("type", "tun")
++                    put("tag", "tun-in")
++                    put("address", buildJsonArray { tunAddresses.forEach { add(it) } })
++                    put("mtu", TUN_MTU)
++                    put("auto_route", true)
++                    put("strict_route", true)
++                }
++            }
++            putJsonArray("endpoints") { group.forEach { add(endpoint(input.servers[it], tags[it])) } }
++            putJsonArray("outbounds") {
++                addJsonObject {
++                    put("type", "selector")
++                    put("tag", VPN)
++                    put("outbounds", buildJsonArray { group.forEach { add(tags[it]) } })
++                    put("default", tags[selectedIndex])
++                    put("interrupt_exist_connections", true)
++                }
++                // A direct outbound must not have "detour" ("detour is not supported in direct context").
++                addJsonObject {
++                    put("type", "direct")
++                    put("tag", DIRECT)
++                }
++                for ((tag, app) in routes) {
++                    addJsonObject {
++                        put("type", "selector")
++                        put("tag", tag)
++                        put(
++                            "outbounds",
++                            buildJsonArray {
++                                add(VPN)
++                                add(DIRECT)
++                            },
++                        )
++                        put("default", if (app.viaVpn) VPN else DIRECT)
++                        put("interrupt_exist_connections", true)
++                    }
++                }
++            }
++            putJsonObject("route") {
++                put("auto_detect_interface", true)
++                put("default_domain_resolver", "local")
++                putJsonArray("rules") {
++                    addJsonObject {
++                        put("port", 53)
++                        put("action", "hijack-dns")
++                    }
++                    // user_id, not package_name: package rules did not match on OxygenOS.
++                    // No "sniff" before these rules: it stopped pre-match and stalled TCP.
++                    for ((tag, app) in routes) {
++                        addJsonObject {
++                            put("user_id", intArray(app.uids.sorted()))
++                            put("outbound", tag)
++                        }
++                    }
++                }
++                put("final", DIRECT)
++            }
++            // Deliberately no experimental.cache_file: it broke Direct traffic on the phone.
++        }
++
++        return GenerateResult.Ok(
++            config = config,
++            selectedTag = tags[selectedIndex],
++            tunAddresses = tunAddresses,
++            dnsServer = dnsServer.text,
++            ipv6 = useIpv6,
++            otherAddressServers = others,
++            appRuleCount = routes.size,
++            warnings = warnings,
++        )
++    }
++
++    private fun endpoint(conf: WireGuardConf, tag: String) = buildJsonObject {
++        put("type", "wireguard")
++        put("tag", tag)
++        put("address", buildJsonArray { conf.addresses.forEach { add(it.toString()) } })
++        put("private_key", conf.privateKey)
++        putJsonArray("peers") {
++            for (p in conf.peers) {
++                addJsonObject {
++                    put("address", p.host)
++                    put("port", p.port)
++                    put("public_key", p.publicKey)
++                    put("allowed_ips", buildJsonArray { p.allowedIps.forEach { add(it) } })
++                    p.presharedKey?.let { put("pre_shared_key", it) }
++                    p.persistentKeepalive?.let { put("persistent_keepalive_interval", it) }
++                }
++            }
++        }
++        conf.mtu?.let { put("mtu", it) }
++    }
++
++    private fun intArray(values: List<Int>) = JsonArray(values.map(::JsonPrimitive))
++}
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
+new file mode 100644
+index 0000000..fb9ef24
+--- /dev/null
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
+@@ -0,0 +1,145 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.config
++
++import io.nekohasekai.sfa.bitproxy.wireguard.ParseResult
++import io.nekohasekai.sfa.bitproxy.wireguard.WireGuardConf
++import io.nekohasekai.sfa.bitproxy.wireguard.WireGuardConfParser
++import kotlinx.serialization.json.Json
++import kotlinx.serialization.json.JsonArray
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.jsonArray
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Assert.fail
++import org.junit.Test
++import java.io.File
++
++/**
++ * Golden tests: expected.json files are the real output of reference/conf-merger.py
++ * (see golden/regenerate.sh), so the in-app generator stays equivalent to the script.
++ */
++class ConfigGeneratorTest {
++    private val golden = File(javaClass.classLoader!!.getResource("bitproxy/golden")!!.toURI())
++
++    private fun servers(case: String): List<WireGuardConf> = File(golden, case).listFiles()!!
++        .filter { it.name.endsWith(".wgtest") }
++        .sortedBy { it.name } // the script sorts file names too
++        .map {
++            when (val r = WireGuardConfParser.parse(it.readText(), it.name.removeSuffix(".wgtest"))) {
++                is ParseResult.Ok -> r.conf
++                is ParseResult.Error -> fail(r.message) as Nothing
++            }
++        }
++
++    private fun expected(case: String) = Json.parseToJsonElement(File(golden, "$case/expected.json").readText())
++
++    private fun ok(input: GeneratorInput): GenerateResult.Ok = when (val r = ConfigGenerator.generate(input)) {
++        is GenerateResult.Ok -> r
++        is GenerateResult.Error -> fail(r.message) as Nothing
++    }
++
++    // Same apps and UIDs as golden/two-servers/pm.txt, in the script's APPS order.
++    private val twoServerApps = listOf(
++        AppRoute("WhatsApp Business", "com.whatsapp.w4b", listOf(10150), true),
++        AppRoute("WhatsApp Business (Clone)", "com.whatsapp.w4b", listOf(99910150), true),
++        AppRoute("Firefox", "org.mozilla.firefox", listOf(10123), true),
++        AppRoute("Discord", "com.discord", listOf(10160), true),
++        AppRoute("Discord (Profile 10)", "com.discord", listOf(1010160), true),
++        AppRoute("Discord (Clone)", "com.discord", listOf(99910160), true),
++    )
++
++    @Test fun matchesScriptTwoServers() {
++        val r = ok(GeneratorInput(servers("two-servers"), null, twoServerApps))
++        assertEquals(expected("two-servers"), r.config)
++        assertEquals("nl-free#1", r.selectedTag)
++    }
++
++    @Test fun matchesScriptEdgeCases() {
++        // CRLF, PSK, keepalive, MTU, [IPv6]:port and hostname endpoints, duplicate tags wg / wg-2.
++        val r = ok(GeneratorInput(servers("edge-cases"), null, listOf(AppRoute("Proton Mail", "ch.protonmail.android", listOf(10200), true))))
++        assertEquals(expected("edge-cases"), r.config)
++    }
++
++    @Test fun selectedServerSetsDefaultAndTunAddress() {
++        val r = ok(GeneratorInput(servers("two-servers"), "us-free-2", twoServerApps))
++        assertEquals("us-free-2", r.selectedTag)
++        val vpn = r.config["outbounds"]!!.jsonArray[0].jsonObject
++        assertEquals("us-free-2", vpn["default"]!!.jsonPrimitive.content)
++        assertEquals(listOf("10.2.0.2/24"), r.tunAddresses)
++    }
++
++    @Test fun serversWithDifferentTunnelAddressAreLeftOut() {
++        val base = servers("two-servers")
++        val other = base[1].copy(addresses = listOf(io.nekohasekai.sfa.bitproxy.net.IpPrefix.parse("10.9.0.7/32")!!))
++        val r = ok(GeneratorInput(listOf(base[0], other), null, twoServerApps))
++        assertEquals(listOf("us-free-2"), r.otherAddressServers)
++        assertEquals(1, r.config["endpoints"]!!.jsonArray.size)
++        assertEquals(listOf("nl-free#1"), r.config["outbounds"]!!.jsonArray[0].jsonObject["outbounds"]!!.jsonArray.map { it.jsonPrimitive.content })
++        assertTrue(r.warnings.single().contains("us-free-2"))
++
++        // Selecting the other server switches the TUN address with it.
++        val r2 = ok(GeneratorInput(listOf(base[0], other), "us-free-2", twoServerApps))
++        assertEquals(listOf("10.9.0.7/24"), r2.tunAddresses)
++    }
++
++    @Test fun tunnelAddressWhoseDnsWouldBeBroadcastIsRejected() {
++        for (bad in listOf("10.2.0.254/32", "10.2.0.255/32", "10.2.0.0/32")) {
++            val conf = servers("two-servers")[0].copy(addresses = listOf(io.nekohasekai.sfa.bitproxy.net.IpPrefix.parse(bad)!!))
++            val r = ConfigGenerator.generate(GeneratorInput(listOf(conf), null, twoServerApps))
++            assertTrue(bad, r is GenerateResult.Error && r.message.contains("broadcast"))
++        }
++    }
++
++    @Test fun directAppsResolveLocally() {
++        val apps = twoServerApps.mapIndexed { i, a -> a.copy(viaVpn = i != 2) } // Firefox Direct
++        val r = ok(GeneratorInput(servers("two-servers"), null, apps))
++        val dnsUids = r.config["dns"]!!.jsonObject["rules"]!!.jsonArray[0].jsonObject["user_id"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() }
++        assertFalse(10123 in dnsUids)
++        val firefox = r.config["outbounds"]!!.jsonArray.first { it.jsonObject["tag"]!!.jsonPrimitive.content == "Firefox" }.jsonObject
++        assertEquals("Direct", firefox["default"]!!.jsonPrimitive.content)
++
++        // All Direct: no DNS rule at all (an empty user_id list would be invalid).
++        val allDirect = ok(GeneratorInput(servers("two-servers"), null, apps.map { it.copy(viaVpn = false) }))
++        assertEquals(JsonArray(emptyList()), allDirect.config["dns"]!!.jsonObject["rules"])
++    }
++
++    @Test fun uninstalledAppsAreSkippedAndDuplicateLabelsGetUniqueTags() {
++        val apps = listOf(
++            AppRoute("Chat", "a.chat", listOf(10001), true),
++            AppRoute("Chat", "b.chat", listOf(10002), true),
++            AppRoute("Direct", "c.weird", listOf(10003), true), // must not clash with the Direct outbound
++            AppRoute("Gone", "d.gone", emptyList(), true),
++        )
++        val r = ok(GeneratorInput(servers("two-servers"), null, apps))
++        val tags = r.config["outbounds"]!!.jsonArray.map { it.jsonObject["tag"]!!.jsonPrimitive.content }
++        assertEquals(listOf("VPN", "Direct", "Chat", "Chat (b.chat)", "Direct (c.weird)"), tags)
++        assertEquals(3, r.appRuleCount)
++    }
++
++    @Test fun ipv6Mode() {
++        val r = ok(GeneratorInput(servers("two-servers"), null, twoServerApps, ipv6 = true))
++        assertEquals(listOf("10.2.0.2/24", "2a07:b944::2:2/126"), r.tunAddresses)
++        assertEquals("prefer_ipv4", r.config["dns"]!!.jsonObject["strategy"]!!.jsonPrimitive.content)
++
++        // Server without an IPv6 address: stay IPv4-only.
++        val v4only = ok(GeneratorInput(servers("edge-cases"), null, twoServerApps, ipv6 = true))
++        assertEquals(listOf("10.2.0.2/24"), v4only.tunAddresses)
++        assertEquals("ipv4_only", v4only.config["dns"]!!.jsonObject["strategy"]!!.jsonPrimitive.content)
++        assertFalse(v4only.ipv6)
++    }
++
++    @Test fun neverUsesCacheFileOrDetourOnDirect() {
++        val json = ok(GeneratorInput(servers("two-servers"), null, twoServerApps)).json
++        assertFalse("cache_file" in json)
++        assertFalse("experimental" in json)
++        val direct = (Json.parseToJsonElement(json) as JsonObject)["outbounds"]!!.jsonArray[1].jsonObject
++        assertFalse("detour" in direct)
++    }
++
++    @Test fun noServersIsAnError() {
++        assertTrue(ConfigGenerator.generate(GeneratorInput(emptyList(), null, twoServerApps)) is GenerateResult.Error)
++    }
++}
+diff --git a/app/src/test/resources/bitproxy/golden/edge-cases/WG.conf.txt.wgtest b/app/src/test/resources/bitproxy/golden/edge-cases/WG.conf.txt.wgtest
+new file mode 100644
+index 0000000..4edb984
+--- /dev/null
++++ b/app/src/test/resources/bitproxy/golden/edge-cases/WG.conf.txt.wgtest
+@@ -0,0 +1,8 @@
++[Interface]
++PrivateKey = zeEvfqDziNiGxua0xnO/9M8HcuFjVVikxPegqgHmgEY=
++Address = 10.2.0.2/32
++DNS = 10.2.0.1
++
++[Peer]
++PublicKey = 9Jg/mew3whp1WZOPQ8we6FK3XYfseOiCbCkxhdwejB4=
++Endpoint = 5.6.7.8:51820
+diff --git a/app/src/test/resources/bitproxy/golden/edge-cases/expected.json b/app/src/test/resources/bitproxy/golden/edge-cases/expected.json
+new file mode 100644
+index 0000000..43ebae9
+--- /dev/null
++++ b/app/src/test/resources/bitproxy/golden/edge-cases/expected.json
+@@ -0,0 +1,136 @@
++{
++  "log": {
++    "level": "warn"
++  },
++  "dns": {
++    "strategy": "ipv4_only",
++    "servers": [
++      {
++        "type": "local",
++        "tag": "local"
++      },
++      {
++        "type": "udp",
++        "tag": "remote",
++        "server": "10.2.0.1",
++        "detour": "VPN"
++      }
++    ],
++    "rules": [
++      {
++        "user_id": [
++          10200
++        ],
++        "server": "remote"
++      }
++    ],
++    "final": "local"
++  },
++  "inbounds": [
++    {
++      "type": "tun",
++      "tag": "tun-in",
++      "address": [
++        "10.2.0.2/24"
++      ],
++      "mtu": 1400,
++      "auto_route": true,
++      "strict_route": true
++    }
++  ],
++  "endpoints": [
++    {
++      "type": "wireguard",
++      "tag": "wg",
++      "address": [
++        "10.2.0.2/32"
++      ],
++      "private_key": "zeEvfqDziNiGxua0xnO/9M8HcuFjVVikxPegqgHmgEY=",
++      "peers": [
++        {
++          "address": "5.6.7.8",
++          "port": 51820,
++          "public_key": "9Jg/mew3whp1WZOPQ8we6FK3XYfseOiCbCkxhdwejB4=",
++          "allowed_ips": [
++            "0.0.0.0/0",
++            "::/0"
++          ]
++        }
++      ]
++    },
++    {
++      "type": "wireguard",
++      "tag": "wg-2",
++      "address": [
++        "10.2.0.2/32"
++      ],
++      "private_key": "9Jg/mew3whp1WZOPQ8we6FK3XYfseOiCbCkxhdwejB4=",
++      "peers": [
++        {
++          "address": "2001:db8::1",
++          "port": 51820,
++          "public_key": "x0g1ZPy9jFo8AWzgEeL45vKt+Wp2NA4vSZkoId4U9fo=",
++          "allowed_ips": [
++            "0.0.0.0/1",
++            "128.0.0.0/1"
++          ],
++          "pre_shared_key": "zeEvfqDziNiGxua0xnO/9M8HcuFjVVikxPegqgHmgEY=",
++          "persistent_keepalive_interval": 25
++        },
++        {
++          "address": "vpn.example.com",
++          "port": 443,
++          "public_key": "kj2cMuzW1kK0ZX47HsnYx6FVYF3b+nD8Vy2MyVe+s6U=",
++          "allowed_ips": [
++            "0.0.0.0/0",
++            "::/0"
++          ]
++        }
++      ],
++      "mtu": 1280
++    }
++  ],
++  "outbounds": [
++    {
++      "type": "selector",
++      "tag": "VPN",
++      "outbounds": [
++        "wg",
++        "wg-2"
++      ],
++      "default": "wg",
++      "interrupt_exist_connections": true
++    },
++    {
++      "type": "direct",
++      "tag": "Direct"
++    },
++    {
++      "type": "selector",
++      "tag": "Proton Mail",
++      "outbounds": [
++        "VPN",
++        "Direct"
++      ],
++      "default": "VPN",
++      "interrupt_exist_connections": true
++    }
++  ],
++  "route": {
++    "auto_detect_interface": true,
++    "default_domain_resolver": "local",
++    "rules": [
++      {
++        "port": 53,
++        "action": "hijack-dns"
++      },
++      {
++        "user_id": [
++          10200
++        ],
++        "outbound": "Proton Mail"
++      }
++    ],
++    "final": "Direct"
++  }
++}
+\ No newline at end of file
+diff --git a/app/src/test/resources/bitproxy/golden/edge-cases/pm.txt b/app/src/test/resources/bitproxy/golden/edge-cases/pm.txt
+new file mode 100644
+index 0000000..b2f1490
+--- /dev/null
++++ b/app/src/test/resources/bitproxy/golden/edge-cases/pm.txt
+@@ -0,0 +1 @@
++package:ch.protonmail.android uid:10200
+diff --git a/app/src/test/resources/bitproxy/golden/edge-cases/wg.conf.wgtest b/app/src/test/resources/bitproxy/golden/edge-cases/wg.conf.wgtest
+new file mode 100644
+index 0000000..154dd7a
+--- /dev/null
++++ b/app/src/test/resources/bitproxy/golden/edge-cases/wg.conf.wgtest
+@@ -0,0 +1,16 @@
++[Interface]
++PrivateKey = 9Jg/mew3whp1WZOPQ8we6FK3XYfseOiCbCkxhdwejB4=
++Address = 10.2.0.2/32
++DNS = 10.2.0.1
++MTU = 1280
++
++[Peer]
++PublicKey = x0g1ZPy9jFo8AWzgEeL45vKt+Wp2NA4vSZkoId4U9fo=
++PresharedKey = zeEvfqDziNiGxua0xnO/9M8HcuFjVVikxPegqgHmgEY=
++PersistentKeepalive = 25
++AllowedIPs = 0.0.0.0/1, 128.0.0.0/1
++Endpoint = [2001:db8::1]:51820
++
++[Peer]
++PublicKey = kj2cMuzW1kK0ZX47HsnYx6FVYF3b+nD8Vy2MyVe+s6U=
++Endpoint = vpn.example.com:443
+diff --git a/app/src/test/resources/bitproxy/golden/regenerate.sh b/app/src/test/resources/bitproxy/golden/regenerate.sh
+new file mode 100755
+index 0000000..cf7d467
+--- /dev/null
++++ b/app/src/test/resources/bitproxy/golden/regenerate.sh
+@@ -0,0 +1,12 @@
++#!/usr/bin/env bash
++# Regenerate expected.json for each golden case by running the reference Termux
++# script (conf-merger.py) with a fake `pm`. Usage: regenerate.sh /path/to/conf-merger.py
++set -euo pipefail
++script=$(readlink -f "$1"); here=$(dirname "$(readlink -f "$0")")
++for case in "$here"/*/; do
++  tmp=$(mktemp -d)
++  for f in "$case"*.wgtest; do cp "$f" "$tmp/$(basename "${f%.wgtest}")"; done
++  mkdir "$tmp/bin" && printf '#!/bin/sh\ncat "%s"\n' "$case/pm.txt" > "$tmp/bin/pm" && chmod +x "$tmp/bin/pm"
++  (cd "$tmp" && PATH="$tmp/bin:$PATH" python3 "$script" >/dev/null) && cp "$tmp/singbox_profile.json" "$case/expected.json"
++  rm -rf "$tmp"
++done
+diff --git a/app/src/test/resources/bitproxy/golden/two-servers/NL-FREE#1.conf.wgtest b/app/src/test/resources/bitproxy/golden/two-servers/NL-FREE#1.conf.wgtest
+new file mode 100644
+index 0000000..b76ffda
+--- /dev/null
++++ b/app/src/test/resources/bitproxy/golden/two-servers/NL-FREE#1.conf.wgtest
+@@ -0,0 +1,11 @@
++[Interface]
++# Key for NL-FREE#1 (dummy key)
++PrivateKey = 9MKflkimNZf317iUt0bS9nDKXETokIXbIOQYRXfjY0k=
++Address = 10.2.0.2/32, 2a07:b944::2:2/128
++DNS = 10.2.0.1, 2a07:b944::2:1
++
++[Peer]
++# NL-FREE#1
++PublicKey = v6HYc92jy9a4Dhx1WlNg93HSzNej2fz0YpAbJFeGulw=
++AllowedIPs = 0.0.0.0/0, ::/0
++Endpoint = 185.107.56.1:51820
+diff --git a/app/src/test/resources/bitproxy/golden/two-servers/US FREE 2.conf.wgtest b/app/src/test/resources/bitproxy/golden/two-servers/US FREE 2.conf.wgtest
+new file mode 100644
+index 0000000..bd4e9dc
+--- /dev/null
++++ b/app/src/test/resources/bitproxy/golden/two-servers/US FREE 2.conf.wgtest	
+@@ -0,0 +1,9 @@
++[Interface]
++PrivateKey = 5W9QbZyelzbCbtMdTwyVye+wZj4FIjDyC9MKNaOykWs=
++Address = 10.2.0.2/32, 2a07:b944::2:2/128
++DNS = 10.2.0.1
++
++[Peer]
++PublicKey = c7dChv+v91jOQSxg7IAyWsrYdNE/u0Z208IUt5CDiu0=
++AllowedIPs = 0.0.0.0/0, ::/0
++Endpoint = 149.88.100.2:51820
+diff --git a/app/src/test/resources/bitproxy/golden/two-servers/expected.json b/app/src/test/resources/bitproxy/golden/two-servers/expected.json
+new file mode 100644
+index 0000000..f4a8616
+--- /dev/null
++++ b/app/src/test/resources/bitproxy/golden/two-servers/expected.json
+@@ -0,0 +1,211 @@
++{
++  "log": {
++    "level": "warn"
++  },
++  "dns": {
++    "strategy": "ipv4_only",
++    "servers": [
++      {
++        "type": "local",
++        "tag": "local"
++      },
++      {
++        "type": "udp",
++        "tag": "remote",
++        "server": "10.2.0.1",
++        "detour": "VPN"
++      }
++    ],
++    "rules": [
++      {
++        "user_id": [
++          10123,
++          10150,
++          10160,
++          1010160,
++          99910150,
++          99910160
++        ],
++        "server": "remote"
++      }
++    ],
++    "final": "local"
++  },
++  "inbounds": [
++    {
++      "type": "tun",
++      "tag": "tun-in",
++      "address": [
++        "10.2.0.2/24"
++      ],
++      "mtu": 1400,
++      "auto_route": true,
++      "strict_route": true
++    }
++  ],
++  "endpoints": [
++    {
++      "type": "wireguard",
++      "tag": "nl-free#1",
++      "address": [
++        "10.2.0.2/32",
++        "2a07:b944::2:2/128"
++      ],
++      "private_key": "9MKflkimNZf317iUt0bS9nDKXETokIXbIOQYRXfjY0k=",
++      "peers": [
++        {
++          "address": "185.107.56.1",
++          "port": 51820,
++          "public_key": "v6HYc92jy9a4Dhx1WlNg93HSzNej2fz0YpAbJFeGulw=",
++          "allowed_ips": [
++            "0.0.0.0/0",
++            "::/0"
++          ]
++        }
++      ]
++    },
++    {
++      "type": "wireguard",
++      "tag": "us-free-2",
++      "address": [
++        "10.2.0.2/32",
++        "2a07:b944::2:2/128"
++      ],
++      "private_key": "5W9QbZyelzbCbtMdTwyVye+wZj4FIjDyC9MKNaOykWs=",
++      "peers": [
++        {
++          "address": "149.88.100.2",
++          "port": 51820,
++          "public_key": "c7dChv+v91jOQSxg7IAyWsrYdNE/u0Z208IUt5CDiu0=",
++          "allowed_ips": [
++            "0.0.0.0/0",
++            "::/0"
++          ]
++        }
++      ]
++    }
++  ],
++  "outbounds": [
++    {
++      "type": "selector",
++      "tag": "VPN",
++      "outbounds": [
++        "nl-free#1",
++        "us-free-2"
++      ],
++      "default": "nl-free#1",
++      "interrupt_exist_connections": true
++    },
++    {
++      "type": "direct",
++      "tag": "Direct"
++    },
++    {
++      "type": "selector",
++      "tag": "WhatsApp Business",
++      "outbounds": [
++        "VPN",
++        "Direct"
++      ],
++      "default": "VPN",
++      "interrupt_exist_connections": true
++    },
++    {
++      "type": "selector",
++      "tag": "WhatsApp Business (Clone)",
++      "outbounds": [
++        "VPN",
++        "Direct"
++      ],
++      "default": "VPN",
++      "interrupt_exist_connections": true
++    },
++    {
++      "type": "selector",
++      "tag": "Firefox",
++      "outbounds": [
++        "VPN",
++        "Direct"
++      ],
++      "default": "VPN",
++      "interrupt_exist_connections": true
++    },
++    {
++      "type": "selector",
++      "tag": "Discord",
++      "outbounds": [
++        "VPN",
++        "Direct"
++      ],
++      "default": "VPN",
++      "interrupt_exist_connections": true
++    },
++    {
++      "type": "selector",
++      "tag": "Discord (Profile 10)",
++      "outbounds": [
++        "VPN",
++        "Direct"
++      ],
++      "default": "VPN",
++      "interrupt_exist_connections": true
++    },
++    {
++      "type": "selector",
++      "tag": "Discord (Clone)",
++      "outbounds": [
++        "VPN",
++        "Direct"
++      ],
++      "default": "VPN",
++      "interrupt_exist_connections": true
++    }
++  ],
++  "route": {
++    "auto_detect_interface": true,
++    "default_domain_resolver": "local",
++    "rules": [
++      {
++        "port": 53,
++        "action": "hijack-dns"
++      },
++      {
++        "user_id": [
++          10150
++        ],
++        "outbound": "WhatsApp Business"
++      },
++      {
++        "user_id": [
++          99910150
++        ],
++        "outbound": "WhatsApp Business (Clone)"
++      },
++      {
++        "user_id": [
++          10123
++        ],
++        "outbound": "Firefox"
++      },
++      {
++        "user_id": [
++          10160
++        ],
++        "outbound": "Discord"
++      },
++      {
++        "user_id": [
++          1010160
++        ],
++        "outbound": "Discord (Profile 10)"
++      },
++      {
++        "user_id": [
++          99910160
++        ],
++        "outbound": "Discord (Clone)"
++      }
++    ],
++    "final": "Direct"
++  }
++}
+\ No newline at end of file
+diff --git a/app/src/test/resources/bitproxy/golden/two-servers/pm.txt b/app/src/test/resources/bitproxy/golden/two-servers/pm.txt
+new file mode 100644
+index 0000000..b458a83
+--- /dev/null
++++ b/app/src/test/resources/bitproxy/golden/two-servers/pm.txt
+@@ -0,0 +1,4 @@
++package:com.android.chrome uid:10111
++package:org.mozilla.firefox uid:10123
++package:com.whatsapp.w4b uid:10150,99910150
++package:com.discord uid:10160,1010160,99910160
+-- 
+2.55.0
+

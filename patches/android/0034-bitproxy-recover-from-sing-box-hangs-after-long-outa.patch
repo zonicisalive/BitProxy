@@ -1,0 +1,307 @@
+From 26bfde58788097ad8986058e50ed87217ebf0fa7 Mon Sep 17 00:00:00 2001
+From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 10:14:46 +0530
+Subject: [PATCH 34/35] bitproxy: recover from sing-box hangs after long
+ outages
+
+Seen on a OnePlus 15: OxygenOS switched Wi-Fi off at night with mobile
+data off (80 min without any network). When Wi-Fi came back the VPN
+still looked on but passed no traffic, and Stop then hung forever
+(sing-box's close never returned), so the app had to be force-stopped.
+Not reproducible on the emulator (3 and 10 min outages, also in Doze,
+recover), so guard against it instead:
+
+- After the underlying network was gone for 2+ min and comes back,
+  build a fresh sing-box instance (libbox reload). If that doesn't
+  return within 20 s, end the process and have an alarm start the VPN
+  service again 3 s later (Always-on does not restart it after process
+  death: tested, still down after 2 min).
+- Stop watchdog: if stopping hasn't finished within 15 s, end the
+  process and show a notification instead of hanging on 'stopping'.
+- EventLog: small on-disk log of start/stop/network lost and back/
+  Apply/watchdog actions, shown in Diagnostics and included in the
+  export, so the next incident leaves evidence (logcat on OxygenOS only
+  covers ~90 s).
+
+Upstream hooks: onFullyStopped() in the two places BoxService marks
+itself Stopped.
+---
+ .../java/io/nekohasekai/sfa/bg/BoxService.kt  |  2 +
+ .../sfa/bitproxy/BitProxyApplier.kt           |  1 +
+ .../sfa/bitproxy/BitProxyServiceHooks.kt      | 99 ++++++++++++++++++-
+ .../io/nekohasekai/sfa/bitproxy/EventLog.kt   | 32 ++++++
+ .../nekohasekai/sfa/bitproxy/Ipv6Watcher.kt   | 22 ++++-
+ .../sfa/bitproxy/ui/DiagnosticsScreen.kt      |  4 +-
+ 6 files changed, 157 insertions(+), 3 deletions(-)
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/EventLog.kt
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+index 77c150b..66e0bf1 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
+@@ -316,6 +316,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+             Settings.dataStore.flush()
+             withContext(Dispatchers.Main) {
+                 status.value = Status.Stopped
++                BitProxyServiceHooks.onFullyStopped()
+                 service.stopSelf()
+             }
+         }
+@@ -353,6 +354,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
+                 callback.onServiceAlert(type.ordinal, message)
+             }
+             status.value = Status.Stopped
++            BitProxyServiceHooks.onFullyStopped()
+             service.stopSelf()
+         }
+     }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+index 341a446..ba4d744 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+@@ -51,6 +51,7 @@ object BitProxyApplier {
+                 Outcome.Failed("Unexpected error: ${e.message ?: e.javaClass.simpleName}")
+             }
+             BitProxyPrefs.recordApply(outcome)
++            EventLog.log(if (outcome is Outcome.Applied) "applied: ${outcome.result.selectedTag}, ${outcome.result.appRuleCount} app rules, reloaded=${outcome.reloaded}" else "apply failed: ${(outcome as Outcome.Failed).message}")
+             AppTileService.requestUpdate()
+             outcome
+         }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt
+index b67f770..7ae84db 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt
+@@ -14,6 +14,7 @@ import io.nekohasekai.sfa.compose.MainActivity
+ import io.nekohasekai.sfa.constant.Alert
+ import io.nekohasekai.sfa.database.ProfileManager
+ import io.nekohasekai.sfa.database.Settings
++import kotlinx.coroutines.launch
+ 
+ /** Small entry points called from upstream BoxService (one line each). */
+ object BitProxyServiceHooks {
+@@ -88,19 +89,115 @@ object BitProxyServiceHooks {
+     @Volatile var running = false
+         private set
+ 
++    private val scope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO)
++    private var stopWatchdog: kotlinx.coroutines.Job? = null
++    private const val STOP_TIMEOUT_MS = 15_000L
++
+     /** The VPN is up: start watching the underlying network and app installs. */
+     fun onStarted() {
++        EventLog.log("VPN started")
+         running = true
+         Ipv6Watcher.start()
+         AppWatcher.start()
+     }
+ 
++    /**
++     * Called when the service starts shutting down, before sing-box is closed. If sing-box hangs
++     * (seen after a long network outage), stopping never finishes and the app sits on
++     * "stopping" until force-stopped. After 15 s, end the process instead: with Always-on the
++     * system restarts the VPN, and "Block connections without VPN" keeps traffic safe meanwhile.
++     */
+     fun onStopped() {
++        EventLog.log("VPN stopping")
++        stopWatchdog?.cancel()
++        stopWatchdog = scope.launch {
++            kotlinx.coroutines.delay(STOP_TIMEOUT_MS)
++            EventLog.log("stop did not finish in ${STOP_TIMEOUT_MS / 1000} s (sing-box hung); ending the process")
++            notifyHung()
++            android.os.Process.killProcess(android.os.Process.myPid())
++        }
+         running = false
+         Ipv6Watcher.stop()
+         AppWatcher.stop()
+     }
+ 
++    /** Hook where BoxService marks itself Stopped: stopping did finish. */
++    fun onFullyStopped() {
++        stopWatchdog?.cancel()
++        stopWatchdog = null
++        EventLog.log("VPN stopped")
++    }
++
++    /**
++     * Fresh sing-box instance after a long outage. libbox's reload closes the old instance and
++     * builds a new one (stop + start would need a background foreground-service start, which
++     * Android 12+ may refuse). If the old instance is hung, the reload hangs too: after 20 s end
++     * the process, and Always-on brings the VPN back.
++     */
++    fun restartVpn(reason: String) = scope.launch {
++        if (!running) return@launch
++        EventLog.log("restarting VPN: $reason")
++        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
++        Thread {
++            runCatching { io.nekohasekai.libbox.Libbox.newStandaloneCommandClient().serviceReload() }
++                .onFailure { EventLog.log("restart failed: ${it.message}") }
++            done.complete(Unit)
++        }.start()
++        if (kotlinx.coroutines.withTimeoutOrNull(20_000) { done.await() } == null) {
++            EventLog.log("restart did not finish in 20 s (sing-box hung); ending the process, VPN restarts in a few seconds")
++            scheduleServiceStart()
++            android.os.Process.killProcess(android.os.Process.myPid())
++        } else {
++            EventLog.log("VPN restarted")
++        }
++    }
++
++    /**
++     * Always-on does NOT restart the VPN after our process dies (tested: still down after 2 min),
++     * so ask the system to start the service again shortly. Works from the background because
++     * BitProxy is exempt from battery optimization (the setup asks for that).
++     */
++    private fun scheduleServiceStart() = runCatching {
++        val ctx = Application.application
++        val intent = Intent(ctx, io.nekohasekai.sfa.bg.VPNService::class.java)
++        val pi = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
++            PendingIntent.getForegroundService(ctx, FAILED_ID + 1, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
++        } else {
++            PendingIntent.getService(ctx, FAILED_ID + 1, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
++        }
++        val alarms = ctx.getSystemService(android.app.AlarmManager::class.java)
++        val at = android.os.SystemClock.elapsedRealtime() + 3_000
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
++            alarms.setAndAllowWhileIdle(android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, at, pi)
++        } else {
++            alarms.set(android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, at, pi)
++        }
++    }.onFailure { EventLog.log("could not schedule restart: ${it.message}") }
++
++    /** A stop you asked for hung and the process had to end: say so, don't restart it. */
++    private fun notifyHung() = runCatching {
++        val nm = Application.notification
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
++            nm.createNotificationChannel(NotificationChannel(CHANNEL, "VPN start errors", NotificationManager.IMPORTANCE_HIGH))
++        }
++        val open = PendingIntent.getActivity(
++            Application.application,
++            0,
++            Intent(Application.application, MainActivity::class.java),
++            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
++        )
++        nm.notify(
++            FAILED_ID,
++            NotificationCompat.Builder(Application.application, CHANNEL)
++                .setSmallIcon(R.drawable.ic_menu)
++                .setContentTitle("BitProxy stopped")
++                .setContentText("It had hung while stopping and was ended. Tap to start the VPN again.")
++                .setContentIntent(open)
++                .setAutoCancel(true)
++                .build(),
++        )
++    }
++
+     /** The service stopped with an error: tell the user even if the UI is closed. */
+     fun onStartFailed(type: Alert, message: String?) {
+         onStopped()
+@@ -131,7 +228,7 @@ object BitProxyServiceHooks {
+                     .setAutoCancel(true)
+                     .build(),
+             )
+-            Log.w(TAG, "start failed: $type $message")
++            EventLog.log("start failed: $type $message")
+         } catch (e: Exception) {
+             Log.w(TAG, "onStartFailed", e)
+         }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/EventLog.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/EventLog.kt
+new file mode 100644
+index 0000000..eb59ec6
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/EventLog.kt
+@@ -0,0 +1,32 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy
++
++import android.util.Log
++import java.io.File
++import java.text.SimpleDateFormat
++import java.util.Date
++import java.util.Locale
++
++/**
++ * Small on-disk log of what happened to the VPN (start, stop, network lost/back, Apply,
++ * watchdog). Android's logcat only keeps minutes on busy phones; this survives the night.
++ * Never write keys or configs here.
++ */
++object EventLog {
++    private const val MAX_LINES = 400
++    private val file get() = File(BitProxyStore.dir, "events.log")
++    private val time = SimpleDateFormat("MM-dd HH:mm:ss", Locale.US)
++
++    @Synchronized
++    fun log(message: String) {
++        Log.i("BitProxy", message)
++        runCatching {
++            val f = file
++            f.appendText("${time.format(Date())} $message\n")
++            if (f.length() > 64 * 1024) f.writeText(f.readLines().takeLast(MAX_LINES / 2).joinToString("\n", postfix = "\n"))
++        }
++    }
++
++    @Synchronized
++    fun tail(lines: Int): List<String> = runCatching { file.readLines().takeLast(lines) }.getOrDefault(emptyList())
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/Ipv6Watcher.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/Ipv6Watcher.kt
+index 6a993fe..53e2d53 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/Ipv6Watcher.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/Ipv6Watcher.kt
+@@ -62,11 +62,31 @@ object Ipv6Watcher {
+ 
+     fun stop() = scope.launch {
+         pending?.cancel()
++        lostSince = 0L
+         hasIpv6 = null
+         DefaultNetworkListener.stop(this@Ipv6Watcher)
+     }
+ 
++    private const val LONG_OUTAGE_MS = 2 * 60_000L
++    private var lostSince = 0L
++
+     private fun onNetwork(network: Network?) {
++        // Long outage recovery: sing-box didn't come back after 80 min without any network (Wi-Fi
++        // switched off overnight by OxygenOS). After an outage of 2+ min, restart it cleanly.
++        if (network == null) {
++            if (lostSince == 0L) {
++                lostSince = System.currentTimeMillis()
++                EventLog.log("network lost")
++            }
++        } else if (lostSince != 0L) {
++            val outage = System.currentTimeMillis() - lostSince
++            lostSince = 0L
++            EventLog.log("network back after ${outage / 1000} s")
++            if (outage >= LONG_OUTAGE_MS) {
++                BitProxyServiceHooks.restartVpn("network was gone for ${outage / 60_000} min")
++                return
++            }
++        }
+         pending?.cancel()
+         pending = scope.launch {
+             delay(DEBOUNCE_MS) // settle: IPv6 addresses often arrive a few seconds after the network
+@@ -78,7 +98,7 @@ object Ipv6Watcher {
+             val wait = lastApply + MIN_INTERVAL_MS - System.currentTimeMillis()
+             if (wait > 0) delay(wait)
+             lastApply = System.currentTimeMillis()
+-            Log.i(TAG, "underlying network IPv6 changed to $now; re-applying")
++            EventLog.log("underlying network IPv6 changed to $now; re-applying")
+             BitProxyApplier.apply(serviceRunning = true, ipv6 = now)
+         }
+     }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DiagnosticsScreen.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DiagnosticsScreen.kt
+index a1d0313..a04f886 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DiagnosticsScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DiagnosticsScreen.kt
+@@ -104,7 +104,9 @@ private suspend fun collectReport(serviceStatus: Status): String = withContext(D
+     add("App", "${BuildConfig.APPLICATION_ID} ${BuildConfig.VERSION_NAME}")
+     add("Core (sing-box)", runCatching { Libbox.version() }.getOrNull())
+     add("Android", "${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT}), ${Build.MANUFACTURER} ${Build.MODEL}")
+-    lines.joinToString("\n") { (k, v) -> "$k: $v" }
++    val events = io.nekohasekai.sfa.bitproxy.EventLog.tail(30)
++    lines.joinToString("\n") { (k, v) -> "$k: $v" } +
++        "\n\nRecent events (newest last):\n" + events.ifEmpty { listOf("(none yet)") }.joinToString("\n")
+ }
+ 
+ /** Report + applied config + this app's recent logcat, with every private/preshared key masked. */
+-- 
+2.55.0
+

@@ -1,0 +1,430 @@
+From c239f88567d9b3cc01fef26048329ccd487b1ec5 Mon Sep 17 00:00:00 2001
+From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
+Date: Thu, 24 Sep 2026 23:54:19 +0530
+Subject: [PATCH 05/35] bitproxy: import WireGuard servers in-app
+
+New BitProxy screen (Settings > BitProxy) to import .conf files through
+the system file picker, select the active server and delete servers.
+Configs are stored in private app storage; choices in SharedPreferences
+keyed by package + user id. Upstream hooks: one route registration in
+Navigation.kt and one entry card in SettingsScreen.kt.
+---
+ .../nekohasekai/sfa/bitproxy/BitProxyPrefs.kt |  49 +++++
+ .../nekohasekai/sfa/bitproxy/BitProxyStore.kt |  93 ++++++++
+ .../sfa/bitproxy/ui/BitProxyScreen.kt         | 206 ++++++++++++++++++
+ .../sfa/compose/navigation/Navigation.kt      |   2 +
+ .../compose/screen/settings/SettingsScreen.kt |   2 +
+ 5 files changed, 352 insertions(+)
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyStore.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+new file mode 100644
+index 0000000..c9d3dc7
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+@@ -0,0 +1,49 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy
++
++import android.content.Context
++import androidx.core.content.edit
++import io.nekohasekai.sfa.Application
++
++/**
++ * BitProxy choices. Apps are keyed by package name + Android user id, never by raw uid,
++ * so a reinstalled app (new uid) keeps its switch.
++ */
++object BitProxyPrefs {
++    private val prefs by lazy { Application.application.getSharedPreferences("bitproxy", Context.MODE_PRIVATE) }
++
++    data class AppKey(val packageName: String, val userId: Int) {
++        override fun toString() = "$packageName:$userId"
++
++        companion object {
++            fun parse(s: String): AppKey? {
++                val i = s.lastIndexOf(':')
++                return s.substring(i + 1).toIntOrNull()?.takeIf { i > 0 }?.let { AppKey(s.substring(0, i), it) }
++            }
++        }
++    }
++
++    enum class Mode { VPN, DIRECT }
++
++    var selectedServer: String?
++        get() = prefs.getString("selected_server", null)
++        set(value) = prefs.edit { putString("selected_server", value) }
++
++    /** Apps that have a switch, with their mode. Apps not in here are not routed specially (final = Direct). */
++    var apps: Map<AppKey, Mode>
++        get() = prefs.getStringSet("apps", emptySet())!!.mapNotNull { entry ->
++            val key = AppKey.parse(entry.substringBeforeLast('='))
++            val mode = runCatching { Mode.valueOf(entry.substringAfterLast('=')) }.getOrNull()
++            if (key != null && mode != null) key to mode else null
++        }.toMap()
++        set(value) = prefs.edit { putStringSet("apps", value.map { (k, m) -> "$k=${m.name}" }.toSet()) }
++
++    fun setApp(key: AppKey, mode: Mode?) {
++        apps = apps.toMutableMap().apply { if (mode == null) remove(key) else put(key, mode) }
++    }
++
++    /** Id of the upstream profile that BitProxy writes its generated config into. */
++    var profileId: Long
++        get() = prefs.getLong("profile_id", -1)
++        set(value) = prefs.edit { putLong("profile_id", value) }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyStore.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyStore.kt
+new file mode 100644
+index 0000000..4942e66
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyStore.kt
+@@ -0,0 +1,93 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy
++
++import android.content.Context
++import android.net.Uri
++import android.provider.OpenableColumns
++import io.nekohasekai.sfa.Application
++import io.nekohasekai.sfa.bitproxy.config.ConfigGenerator
++import io.nekohasekai.sfa.bitproxy.wireguard.ParseResult
++import io.nekohasekai.sfa.bitproxy.wireguard.WireGuardConf
++import io.nekohasekai.sfa.bitproxy.wireguard.WireGuardConfParser
++import java.io.File
++
++/** An imported server: the stored file plus its parse result. */
++data class StoredServer(val file: File, val tag: String, val conf: WireGuardConf)
++
++/**
++ * Imported WireGuard configs live in private app storage (filesDir/bitproxy/servers),
++ * never on shared storage. All functions do file I/O: call them off the main thread.
++ */
++object BitProxyStore {
++    private const val MAX_CONF_BYTES = 64 * 1024
++
++    private val context: Context get() = Application.application
++    val dir: File get() = File(context.filesDir, "bitproxy").apply { mkdirs() }
++    private val serversDir: File get() = File(dir, "servers").apply { mkdirs() }
++
++    /** Servers sorted by file name (like conf-merger.py), with their endpoint tags. */
++    fun servers(): List<StoredServer> {
++        val parsed = serversDir.listFiles().orEmpty().filter { it.isFile }.sortedBy { it.name }.mapNotNull { f ->
++            (WireGuardConfParser.parse(f.readText(), f.name) as? ParseResult.Ok)?.let { f to it.conf }
++        }
++        val tags = ConfigGenerator.endpointTags(parsed.map { it.second })
++        return parsed.mapIndexed { i, (f, conf) -> StoredServer(f, tags[i], conf) }
++    }
++
++    /**
++     * Imports one .conf from a document URI. A file with the same name is replaced,
++     * so re-importing an updated export just works. Returns a message for the user.
++     */
++    fun import(uri: Uri): ImportResult {
++        val name = displayName(uri) ?: uri.lastPathSegment?.substringAfterLast('/') ?: "server.conf"
++        val bytes = try {
++            context.contentResolver.openInputStream(uri)?.use { it.readNBytesCompat(MAX_CONF_BYTES + 1) }
++        } catch (e: Exception) {
++            return ImportResult(false, "$name: could not be opened (${e.javaClass.simpleName})")
++        } ?: return ImportResult(false, "$name: could not be opened")
++        if (bytes.size > MAX_CONF_BYTES) return ImportResult(false, "$name: too large for a WireGuard config")
++
++        return when (val r = WireGuardConfParser.parse(bytes.toString(Charsets.UTF_8), name)) {
++            is ParseResult.Error -> ImportResult(false, r.message)
++            is ParseResult.Ok -> {
++                val target = File(serversDir, safeFileName(r.conf.name) + ".conf")
++                val tmp = File(serversDir, target.name + ".tmp")
++                tmp.writeBytes(bytes)
++                if (!tmp.renameTo(target)) {
++                    tmp.delete()
++                    return ImportResult(false, "$name: could not be saved")
++                }
++                ImportResult(true, (listOf("Imported ${r.conf.name}") + r.warnings).joinToString("\n"))
++            }
++        }
++    }
++
++    fun delete(server: StoredServer) {
++        server.file.delete()
++        if (BitProxyPrefs.selectedServer == server.tag) BitProxyPrefs.selectedServer = null
++    }
++
++    private fun displayName(uri: Uri): String? = try {
++        context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
++            if (c.moveToFirst()) c.getString(0) else null
++        }
++    } catch (_: Exception) {
++        null
++    }
++
++    /** Keeps the name readable (it becomes the endpoint tag) but safe as a file name. */
++    private fun safeFileName(name: String) = name.replace(Regex("""[/\\:*?"<>|\u0000-\u001f]"""), "_").trim().trimStart('.').ifEmpty { "server" }.take(100)
++
++    private fun java.io.InputStream.readNBytesCompat(limit: Int): ByteArray {
++        val out = java.io.ByteArrayOutputStream()
++        val buf = ByteArray(8192)
++        while (out.size() < limit) {
++            val n = read(buf, 0, minOf(buf.size, limit - out.size()))
++            if (n < 0) break
++            out.write(buf, 0, n)
++        }
++        return out.toByteArray()
++    }
++}
++
++data class ImportResult(val ok: Boolean, val message: String)
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+new file mode 100644
+index 0000000..c8d1355
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+@@ -0,0 +1,206 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.ui
++
++import androidx.activity.compose.rememberLauncherForActivityResult
++import androidx.activity.result.contract.ActivityResultContracts
++import androidx.compose.animation.AnimatedContentTransitionScope
++import androidx.compose.animation.core.tween
++import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.fillMaxSize
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.rememberScrollState
++import androidx.compose.foundation.verticalScroll
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.automirrored.filled.ArrowBack
++import androidx.compose.material.icons.outlined.Delete
++import androidx.compose.material.icons.outlined.FileOpen
++import androidx.compose.material.icons.outlined.Shield
++import androidx.compose.material3.AlertDialog
++import androidx.compose.material3.Card
++import androidx.compose.material3.CardDefaults
++import androidx.compose.material3.ExperimentalMaterial3Api
++import androidx.compose.material3.FilledTonalButton
++import androidx.compose.material3.Icon
++import androidx.compose.material3.IconButton
++import androidx.compose.material3.ListItem
++import androidx.compose.material3.ListItemDefaults
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.RadioButton
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.material3.TopAppBar
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.unit.dp
++import androidx.navigation.NavController
++import androidx.navigation.NavGraphBuilder
++import androidx.navigation.compose.composable
++import io.nekohasekai.sfa.bitproxy.BitProxyPrefs
++import io.nekohasekai.sfa.bitproxy.BitProxyStore
++import io.nekohasekai.sfa.bitproxy.StoredServer
++import io.nekohasekai.sfa.compose.topbar.LocalScaffoldPadding
++import io.nekohasekai.sfa.compose.topbar.OverrideTopBar
++import io.nekohasekai.sfa.constant.Status
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++
++/** Hook: called once from the upstream NavHost to register all BitProxy screens. */
++// Routes must start with "settings/": MainActivity sends unknown root routes back to the dashboard.
++fun NavGraphBuilder.bitProxyRoutes(navController: NavController, serviceStatus: Status) {
++    val enter: AnimatedContentTransitionScope<*>.() -> androidx.compose.animation.EnterTransition =
++        { slideIntoContainer(AnimatedContentTransitionScope.SlideDirection.Left, tween(300)) }
++    val exit: AnimatedContentTransitionScope<*>.() -> androidx.compose.animation.ExitTransition =
++        { slideOutOfContainer(AnimatedContentTransitionScope.SlideDirection.Right, tween(300)) }
++    composable("settings/bitproxy", enterTransition = enter, popExitTransition = exit) {
++        BitProxyScreen(navController, serviceStatus)
++    }
++}
++
++/** Hook: entry card at the top of the upstream Settings screen. */
++@Composable
++fun BitProxySettingsEntry(navController: NavController) {
++    Card(
++        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
++        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
++    ) {
++        ListItem(
++            headlineContent = { Text("BitProxy", style = MaterialTheme.typography.bodyLarge) },
++            supportingContent = { Text("WireGuard servers and per-app VPN / Direct") },
++            leadingContent = { Icon(Icons.Outlined.Shield, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
++            modifier = Modifier.clickable { navController.navigate("settings/bitproxy") },
++            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
++        )
++    }
++}
++
++@OptIn(ExperimentalMaterial3Api::class)
++@Composable
++fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
++    OverrideTopBar {
++        TopAppBar(
++            title = { Text("BitProxy") },
++            navigationIcon = {
++                IconButton(onClick = { navController.navigateUp() }) {
++                    Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
++                }
++            },
++        )
++    }
++
++    val scope = rememberCoroutineScope()
++    var servers by remember { mutableStateOf<List<StoredServer>>(emptyList()) }
++    var selected by remember { mutableStateOf(BitProxyPrefs.selectedServer) }
++    var reload by remember { mutableIntStateOf(0) }
++    var message by remember { mutableStateOf<String?>(null) }
++    var confirmDelete by remember { mutableStateOf<StoredServer?>(null) }
++
++    LaunchedEffect(reload) {
++        servers = withContext(Dispatchers.IO) { BitProxyStore.servers() }
++        if (servers.none { it.tag == selected }) selected = servers.firstOrNull()?.tag
++    }
++
++    val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
++        if (uris.isEmpty()) return@rememberLauncherForActivityResult
++        scope.launch {
++            val results = withContext(Dispatchers.IO) { uris.map(BitProxyStore::import) }
++            message = results.joinToString("\n\n") { (if (it.ok) "✓ " else "✗ ") + it.message }
++            reload++
++        }
++    }
++
++    val scaffoldPadding = LocalScaffoldPadding.current
++    Column(
++        modifier = Modifier
++            .fillMaxSize()
++            .background(MaterialTheme.colorScheme.surface)
++            .verticalScroll(rememberScrollState())
++            .padding(top = scaffoldPadding.calculateTopPadding() + 8.dp, bottom = scaffoldPadding.calculateBottomPadding() + 8.dp),
++    ) {
++        Card(
++            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
++            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
++        ) {
++            Text("Servers", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp, 16.dp, 16.dp, 4.dp))
++            if (servers.isEmpty()) {
++                Text(
++                    "No servers yet. Import WireGuard .conf files (for example from Proton VPN).",
++                    style = MaterialTheme.typography.bodyMedium,
++                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
++                )
++            }
++            val selectedAddress = servers.firstOrNull { it.tag == selected }?.conf?.ipv4Address?.address
++            for (server in servers) {
++                val sameAddress = server.conf.ipv4Address.address == selectedAddress
++                ListItem(
++                    headlineContent = { Text(server.tag) },
++                    supportingContent = {
++                        val peer = server.conf.peers.first()
++                        Text(
++                            "${peer.host}:${peer.port} · tunnel ${server.conf.ipv4Address.address}" +
++                                if (!sameAddress) "\nDifferent tunnel address: selecting it switches the whole config" else "",
++                        )
++                    },
++                    leadingContent = {
++                        RadioButton(selected = server.tag == selected, onClick = {
++                            selected = server.tag
++                            BitProxyPrefs.selectedServer = server.tag
++                        })
++                    },
++                    trailingContent = {
++                        IconButton(onClick = { confirmDelete = server }) { Icon(Icons.Outlined.Delete, contentDescription = "Delete") }
++                    },
++                    modifier = Modifier.clickable {
++                        selected = server.tag
++                        BitProxyPrefs.selectedServer = server.tag
++                    },
++                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
++                )
++            }
++            FilledTonalButton(
++                onClick = { importLauncher.launch(arrayOf("*/*")) },
++                modifier = Modifier.padding(16.dp),
++            ) {
++                Icon(Icons.Outlined.FileOpen, contentDescription = null)
++                Text("  Import .conf files")
++            }
++        }
++    }
++
++    message?.let {
++        AlertDialog(
++            onDismissRequest = { message = null },
++            title = { Text("Import") },
++            text = { Text(it) },
++            confirmButton = { TextButton(onClick = { message = null }) { Text("OK") } },
++        )
++    }
++    confirmDelete?.let { server ->
++        AlertDialog(
++            onDismissRequest = { confirmDelete = null },
++            title = { Text("Delete ${server.tag}?") },
++            text = { Text("The imported config file is removed from the app.") },
++            confirmButton = {
++                TextButton(onClick = {
++                    confirmDelete = null
++                    scope.launch {
++                        withContext(Dispatchers.IO) { BitProxyStore.delete(server) }
++                        reload++
++                    }
++                }) { Text("Delete") }
++            },
++            dismissButton = { TextButton(onClick = { confirmDelete = null }) { Text("Cancel") } },
++        )
++    }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/navigation/Navigation.kt b/app/src/main/java/io/nekohasekai/sfa/compose/navigation/Navigation.kt
+index 8ab1513..8324f93 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/navigation/Navigation.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/navigation/Navigation.kt
+@@ -12,6 +12,7 @@ import androidx.navigation.NavHostController
+ import androidx.navigation.NavType
+ import androidx.navigation.compose.composable
+ import androidx.navigation.navArgument
++import io.nekohasekai.sfa.bitproxy.ui.bitProxyRoutes
+ import io.nekohasekai.sfa.compose.screen.configuration.NewProfileScreen
+ import io.nekohasekai.sfa.compose.screen.connections.ConnectionDetailsRoute
+ import io.nekohasekai.sfa.compose.screen.connections.ConnectionsPage
+@@ -609,6 +610,7 @@ fun NavHost(
+         composable(Screen.Settings.route) {
+             SettingsScreen(navController = navController)
+         }
++        bitProxyRoutes(navController, serviceStatus)
+ 
+         // Settings subscreens with slide animations
+         composable(
+diff --git a/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/SettingsScreen.kt b/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/SettingsScreen.kt
+index e480f9d..85e98e4 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/SettingsScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/compose/screen/settings/SettingsScreen.kt
+@@ -45,6 +45,7 @@ import androidx.compose.ui.res.stringResource
+ import androidx.compose.ui.unit.dp
+ import androidx.navigation.NavController
+ import io.nekohasekai.sfa.R
++import io.nekohasekai.sfa.bitproxy.ui.BitProxySettingsEntry
+ import io.nekohasekai.sfa.compose.topbar.LocalScaffoldPadding
+ import io.nekohasekai.sfa.compose.topbar.OverrideTopBar
+ import io.nekohasekai.sfa.database.Settings
+@@ -84,6 +85,7 @@ fun SettingsScreen(navController: NavController) {
+                 bottom = scaffoldPadding.calculateBottomPadding() + 8.dp,
+             ),
+     ) {
++        BitProxySettingsEntry(navController)
+         // General Settings Group
+         Card(
+             modifier =
+-- 
+2.55.0
+

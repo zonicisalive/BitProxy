@@ -1,0 +1,325 @@
+From ff4d9618d630247f60cdf11a3cbd58fea1184cc7 Mon Sep 17 00:00:00 2001
+From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 01:27:48 +0530
+Subject: [PATCH 25/35] bitproxy: Quick Settings tiles to flip apps between VPN
+ and Direct
+
+Three tile slots ('BitProxy app 1..3', tiles must be declared in the
+manifest). Pick the app for each slot in Settings > BitProxy > Quick
+Settings tiles; the tile shows the app name and VPN/Direct/Blocked,
+and a tap flips VPN <-> Direct and re-applies (reloading only if the
+VPN runs). An unassigned tile opens BitProxy. Tiles refresh after every
+Apply.
+---
+ app/src/main/AndroidManifest.xml              | 42 +++++++++
+ .../sfa/bitproxy/AppTileService.kt            | 83 ++++++++++++++++++
+ .../sfa/bitproxy/BitProxyApplier.kt           |  1 +
+ .../nekohasekai/sfa/bitproxy/BitProxyPrefs.kt |  5 ++
+ .../sfa/bitproxy/BitProxyServiceHooks.kt      |  8 +-
+ .../sfa/bitproxy/ui/BitProxyScreen.kt         |  1 +
+ .../nekohasekai/sfa/bitproxy/ui/TilesCard.kt  | 85 +++++++++++++++++++
+ 7 files changed, 224 insertions(+), 1 deletion(-)
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/AppTileService.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/TilesCard.kt
+
+diff --git a/app/src/main/AndroidManifest.xml b/app/src/main/AndroidManifest.xml
+index 652bc4e..d3f3e67 100644
+--- a/app/src/main/AndroidManifest.xml
++++ b/app/src/main/AndroidManifest.xml
+@@ -217,6 +217,48 @@
+             </intent-filter>
+         </provider>
+ 
++        <!-- BitProxy: one Quick Settings tile per slot, each flips one app between VPN and Direct -->
++        <service
++            android:name="io.nekohasekai.sfa.bitproxy.AppTileService1"
++            android:exported="true"
++            android:icon="@drawable/ic_bitproxy_monochrome"
++            android:label="BitProxy app 1"
++            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
++            <intent-filter>
++                <action android:name="android.service.quicksettings.action.QS_TILE" />
++            </intent-filter>
++            <meta-data
++                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
++                android:value="true" />
++        </service>
++
++        <service
++            android:name="io.nekohasekai.sfa.bitproxy.AppTileService2"
++            android:exported="true"
++            android:icon="@drawable/ic_bitproxy_monochrome"
++            android:label="BitProxy app 2"
++            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
++            <intent-filter>
++                <action android:name="android.service.quicksettings.action.QS_TILE" />
++            </intent-filter>
++            <meta-data
++                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
++                android:value="true" />
++        </service>
++
++        <service
++            android:name="io.nekohasekai.sfa.bitproxy.AppTileService3"
++            android:exported="true"
++            android:icon="@drawable/ic_bitproxy_monochrome"
++            android:label="BitProxy app 3"
++            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
++            <intent-filter>
++                <action android:name="android.service.quicksettings.action.QS_TILE" />
++            </intent-filter>
++            <meta-data
++                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
++                android:value="true" />
++        </service>
+     </application>
+ 
+ </manifest>
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppTileService.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppTileService.kt
+new file mode 100644
+index 0000000..7297d50
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppTileService.kt
+@@ -0,0 +1,83 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy
++
++import android.app.PendingIntent
++import android.content.ComponentName
++import android.content.Intent
++import android.os.Build
++import android.service.quicksettings.Tile
++import android.service.quicksettings.TileService
++import io.nekohasekai.sfa.Application
++import io.nekohasekai.sfa.bitproxy.BitProxyPrefs.AppKey
++import io.nekohasekai.sfa.bitproxy.config.Mode
++import io.nekohasekai.sfa.compose.MainActivity
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.launch
++
++/**
++ * Quick Settings tile that flips one app between VPN and Direct. Tiles must be declared in the
++ * manifest, so there are three fixed slots; which app a slot controls is chosen in BitProxy.
++ */
++abstract class AppTileService(private val slot: Int) : TileService() {
++    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++
++    override fun onStartListening() = refresh()
++
++    private fun refresh() {
++        val tile = qsTile ?: return
++        val key = BitProxyPrefs.tileApp(slot)
++        val mode = key?.let { BitProxyPrefs.apps[it] }
++        if (key == null) {
++            tile.label = "BitProxy app $slot"
++            tile.state = Tile.STATE_INACTIVE
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) tile.subtitle = "Tap to set up"
++        } else {
++            val info = runCatching { Application.packageManager.getApplicationInfo(key.packageName, 0) }.getOrNull()
++            tile.label = (info?.loadLabel(Application.packageManager)?.toString() ?: key.packageName) + Uid.userLabel(key.userId)
++            tile.state = if (mode == Mode.VPN) Tile.STATE_ACTIVE else Tile.STATE_INACTIVE
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++                tile.subtitle = when (mode) {
++                    Mode.VPN -> "VPN"
++                    Mode.BLOCK -> "Blocked"
++                    else -> "Direct"
++                }
++            }
++        }
++        tile.updateTile()
++    }
++
++    override fun onClick() {
++        val key = BitProxyPrefs.tileApp(slot) ?: return openApp()
++        val next = if (BitProxyPrefs.apps[key] == Mode.VPN) Mode.DIRECT else Mode.VPN
++        BitProxyPrefs.apps = BitProxyPrefs.apps + (key to next)
++        refresh()
++        scope.launch { BitProxyApplier.apply(serviceRunning = BitProxyServiceHooks.running) }
++    }
++
++    private fun openApp() {
++        val intent = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
++        if (Build.VERSION.SDK_INT >= 34) {
++            startActivityAndCollapse(PendingIntent.getActivity(this, slot, intent, PendingIntent.FLAG_IMMUTABLE))
++        } else {
++            @Suppress("DEPRECATION", "StartActivityAndCollapseDeprecated")
++            startActivityAndCollapse(intent)
++        }
++    }
++
++    companion object {
++        val classes = listOf(AppTileService1::class.java, AppTileService2::class.java, AppTileService3::class.java)
++
++        /** Ask the system to redraw the tiles after a change made in the app. */
++        fun requestUpdate() = classes.forEach {
++            runCatching { requestListeningState(Application.application, ComponentName(Application.application, it)) }
++        }
++    }
++}
++
++class AppTileService1 : AppTileService(1)
++
++class AppTileService2 : AppTileService(2)
++
++class AppTileService3 : AppTileService(3)
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+index 344a8e7..cb93e51 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+@@ -49,6 +49,7 @@ object BitProxyApplier {
+                 Outcome.Failed("Unexpected error: ${e.message ?: e.javaClass.simpleName}")
+             }
+             BitProxyPrefs.recordApply(outcome)
++            AppTileService.requestUpdate()
+             outcome
+         }
+     }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+index d2f7822..2a9abcc 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+@@ -60,6 +60,11 @@ object BitProxyPrefs {
+         get() = prefs.getStringSet("trusted_wifi", emptySet())!!.sorted()
+         set(value) = prefs.edit { putStringSet("trusted_wifi", value.map { it.trim() }.filter { it.isNotEmpty() }.toSet()) }
+ 
++    /** App shown on Quick Settings tile [slot] (1..3), or null. */
++    fun tileApp(slot: Int): AppKey? = prefs.getString("tile_$slot", null)?.let(AppKey::parse)
++
++    fun setTileApp(slot: Int, key: AppKey?) = prefs.edit { if (key == null) remove("tile_$slot") else putString("tile_$slot", key.toString()) }
++
+     var autoPick: Boolean
+         get() = prefs.getBoolean("auto_pick", false)
+         set(value) = prefs.edit { putBoolean("auto_pick", value) }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt
+index 102a915..b67f770 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt
+@@ -84,13 +84,19 @@ object BitProxyServiceHooks {
+         }
+     }
+ 
+-    /** The VPN is up: start watching the underlying network for IPv6 changes. */
++    /** True while the VPN runs (same process as the UI and the tiles). */
++    @Volatile var running = false
++        private set
++
++    /** The VPN is up: start watching the underlying network and app installs. */
+     fun onStarted() {
++        running = true
+         Ipv6Watcher.start()
+         AppWatcher.start()
+     }
+ 
+     fun onStopped() {
++        running = false
+         Ipv6Watcher.stop()
+         AppWatcher.stop()
+     }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+index 3471810..506ccf6 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+@@ -317,6 +317,7 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+                 }) { Text("Leak test (open in a VPN app, then a Direct app)") }
+             }
+         }
++        TilesCard()
+         TrustedWifiCard()
+         NotificationsCard()
+     }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/TilesCard.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/TilesCard.kt
+new file mode 100644
+index 0000000..103b449
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/TilesCard.kt
+@@ -0,0 +1,85 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.ui
++
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.material3.Card
++import androidx.compose.material3.CardDefaults
++import androidx.compose.material3.DropdownMenu
++import androidx.compose.material3.DropdownMenuItem
++import androidx.compose.material3.ListItem
++import androidx.compose.material3.ListItemDefaults
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.LaunchedEffect
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.unit.dp
++import io.nekohasekai.sfa.bitproxy.AppResolver
++import io.nekohasekai.sfa.bitproxy.AppTileService
++import io.nekohasekai.sfa.bitproxy.BitProxyPrefs
++import io.nekohasekai.sfa.bitproxy.BitProxyPrefs.AppKey
++import io.nekohasekai.sfa.bitproxy.Uid
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.withContext
++
++/** Choose which app each of the three Quick Settings tiles flips between VPN and Direct. */
++@Composable
++fun TilesCard() {
++    var labels by remember { mutableStateOf<Map<AppKey, String>>(emptyMap()) }
++    var slots by remember { mutableStateOf((1..3).associateWith { BitProxyPrefs.tileApp(it) }) }
++    LaunchedEffect(Unit) {
++        labels = withContext(Dispatchers.IO) {
++            val scan = AppResolver.scan()
++            BitProxyPrefs.apps.keys.associateWith { scan.label(it.packageName) + Uid.userLabel(it.userId) }
++        }
++    }
++
++    Card(
++        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
++        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
++    ) {
++        Text("Quick Settings tiles", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp, 16.dp, 16.dp, 0.dp))
++        Text(
++            "Each tile flips one app between VPN and Direct. Pick the apps here, then edit your Quick " +
++                "Settings and drag in \"BitProxy app 1\", \"2\" or \"3\".",
++            style = MaterialTheme.typography.bodySmall,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
++        )
++        for (slot in 1..3) {
++            var menu by remember { mutableStateOf(false) }
++            val key = slots[slot]
++            Box {
++                ListItem(
++                    headlineContent = { Text("Tile $slot") },
++                    supportingContent = { Text(key?.let { labels[it] ?: it.packageName } ?: "Not set") },
++                    modifier = Modifier.clickable { menu = true },
++                    colors = ListItemDefaults.colors(containerColor = Color.Transparent),
++                )
++                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
++                    fun choose(k: AppKey?) {
++                        menu = false
++                        BitProxyPrefs.setTileApp(slot, k)
++                        slots = slots + (slot to k)
++                        AppTileService.requestUpdate()
++                    }
++                    DropdownMenuItem(text = { Text("Not set") }, onClick = { choose(null) })
++                    labels.entries.sortedBy { it.value.lowercase() }.forEach { (k, label) ->
++                        DropdownMenuItem(text = { Text(label) }, onClick = { choose(k) })
++                    }
++                    if (labels.isEmpty()) {
++                        DropdownMenuItem(text = { Text("Set up apps first (Apps)") }, onClick = { menu = false }, enabled = false)
++                    }
++                }
++            }
++        }
++    }
++}
+-- 
+2.55.0
+

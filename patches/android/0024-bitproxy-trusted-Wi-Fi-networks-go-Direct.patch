@@ -1,0 +1,315 @@
+From 9d8a41e5b2f282accab3180626cbc6a27d491883 Mon Sep 17 00:00:00 2001
+From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 01:22:50 +0530
+Subject: [PATCH 24/35] bitproxy: trusted Wi-Fi networks go Direct
+
+List of Wi-Fi names (typed or 'Add current Wi-Fi') where every app goes
+Direct and DNS resolves locally; blocked apps stay blocked. Implemented
+as sing-box wifi_ssid rules, so joining or leaving a network needs no
+reload. Android only reveals SSIDs with location permission ('Allow all
+the time' for the service); the card requests it, and Apply refuses
+while it is missing, because upstream would otherwise refuse to start
+the VPN.
+---
+ .../sfa/bitproxy/BitProxyApplier.kt           |   6 +-
+ .../nekohasekai/sfa/bitproxy/BitProxyPrefs.kt |   5 +
+ .../sfa/bitproxy/WifiPermission.kt            |  28 ++++
+ .../sfa/bitproxy/config/ConfigGenerator.kt    |  16 +++
+ .../sfa/bitproxy/ui/BitProxyScreen.kt         |   1 +
+ .../sfa/bitproxy/ui/TrustedWifiCard.kt        | 127 ++++++++++++++++++
+ .../bitproxy/config/ConfigGeneratorTest.kt    |  15 +++
+ 7 files changed, 197 insertions(+), 1 deletion(-)
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/WifiPermission.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/TrustedWifiCard.kt
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+index 54122cc..344a8e7 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+@@ -54,9 +54,13 @@ object BitProxyApplier {
+     }
+ 
+     private suspend fun applyLocked(serviceRunning: Boolean, ipv6: Boolean): Outcome {
++        // wifi_ssid rules make upstream refuse to start without location permission; fail here instead.
++        if (BitProxyPrefs.trustedWifi.isNotEmpty() && !WifiPermission.granted()) {
++            return Outcome.Failed("Trusted Wi-Fi needs location permission set to \"Allow all the time\". Grant it in the Trusted Wi-Fi card.")
++        }
+         val servers = BitProxyStore.servers()
+         val routes = AppResolver.scan().routes(BitProxyPrefs.apps)
+-        var result = when (val r = ConfigGenerator.generate(GeneratorInput(servers.map { it.conf }, BitProxyPrefs.selectedServer, routes, ipv6, BitProxyPrefs.autoPick, BitProxyPrefs.vpnDomains))) {
++        var result = when (val r = ConfigGenerator.generate(GeneratorInput(servers.map { it.conf }, BitProxyPrefs.selectedServer, routes, ipv6, BitProxyPrefs.autoPick, BitProxyPrefs.vpnDomains, BitProxyPrefs.trustedWifi))) {
+             is GenerateResult.Error -> return Outcome.Failed(r.message)
+             is GenerateResult.Ok -> r
+         }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+index dc3117c..d2f7822 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+@@ -55,6 +55,11 @@ object BitProxyPrefs {
+         get() = prefs.getBoolean("ask_new_apps", true)
+         set(value) = prefs.edit { putBoolean("ask_new_apps", value) }
+ 
++    /** Wi-Fi names where everything goes Direct. */
++    var trustedWifi: List<String>
++        get() = prefs.getStringSet("trusted_wifi", emptySet())!!.sorted()
++        set(value) = prefs.edit { putStringSet("trusted_wifi", value.map { it.trim() }.filter { it.isNotEmpty() }.toSet()) }
++
+     var autoPick: Boolean
+         get() = prefs.getBoolean("auto_pick", false)
+         set(value) = prefs.edit { putBoolean("auto_pick", value) }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/WifiPermission.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/WifiPermission.kt
+new file mode 100644
+index 0000000..31f7062
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/WifiPermission.kt
+@@ -0,0 +1,28 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy
++
++import android.Manifest
++import android.content.Context
++import android.content.pm.PackageManager
++import android.net.wifi.WifiManager
++import android.os.Build
++import androidx.core.content.ContextCompat
++import io.nekohasekai.sfa.Application
++
++/** Android only reveals Wi-Fi names (SSIDs) with location permission, "all the time" for a service. */
++object WifiPermission {
++    fun foreground() = has(Manifest.permission.ACCESS_FINE_LOCATION)
++
++    fun background() = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q || has(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
++
++    fun granted() = foreground() && background()
++
++    private fun has(p: String) = ContextCompat.checkSelfPermission(Application.application, p) == PackageManager.PERMISSION_GRANTED
++
++    /** Current Wi-Fi name, or null (not on Wi-Fi, no permission, or location switched off). */
++    fun currentSsid(): String? = runCatching {
++        val wm = Application.application.applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
++        @Suppress("DEPRECATION")
++        wm.connectionInfo?.ssid?.removeSurrounding("\"")?.takeIf { it.isNotBlank() && it != WifiManager.UNKNOWN_SSID && it != "<unknown ssid>" }
++    }.getOrNull()
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
+index f457c45..2d78a53 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
+@@ -40,6 +40,8 @@ data class GeneratorInput(
+     val autoPick: Boolean = false,
+     /** Domains (and their subdomains) that always go through the VPN, also for Direct apps. */
+     val vpnDomains: List<String> = emptyList(),
++    /** Wi-Fi networks (SSIDs) where every app goes Direct, except blocked apps. */
++    val trustedWifi: List<String> = emptyList(),
+ )
+ 
+ sealed interface GenerateResult {
+@@ -122,6 +124,7 @@ object ConfigGenerator {
+         val domains = input.vpnDomains.map { it.trim().trimStart('.').lowercase() }.filter { it.isNotEmpty() }.distinct()
+         val vpnUids = routes.filter { it.viaVpn }.flatMap { it.uids }.distinct().sorted()
+         val blockUids = routes.filter { it.mode == Mode.BLOCK }.flatMap { it.uids }.distinct().sorted()
++        val wifi = input.trustedWifi.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+ 
+         val config = buildJsonObject {
+             putJsonObject("log") { put("level", "warn") }
+@@ -147,6 +150,12 @@ object ConfigGenerator {
+                             put("action", "reject")
+                         }
+                     }
++                    if (wifi.isNotEmpty()) {
++                        addJsonObject {
++                            put("wifi_ssid", buildJsonArray { wifi.forEach { add(it) } })
++                            put("server", "local")
++                        }
++                    }
+                     if (vpnUids.isNotEmpty()) {
+                         addJsonObject {
+                             put("user_id", intArray(vpnUids))
+@@ -208,6 +217,13 @@ object ConfigGenerator {
+                             put("action", "reject")
+                         }
+                     }
++                    // Trusted Wi-Fi: everything Direct (checked live by sing-box, no reload on join/leave).
++                    if (wifi.isNotEmpty()) {
++                        addJsonObject {
++                            put("wifi_ssid", buildJsonArray { wifi.forEach { add(it) } })
++                            put("outbound", DIRECT)
++                        }
++                    }
+                     for (app in routes.filter { it.mode != Mode.BLOCK }) {
+                         addJsonObject {
+                             put("user_id", intArray(app.uids.sorted()))
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+index 76526d1..3471810 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+@@ -317,6 +317,7 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+                 }) { Text("Leak test (open in a VPN app, then a Direct app)") }
+             }
+         }
++        TrustedWifiCard()
+         NotificationsCard()
+     }
+ 
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/TrustedWifiCard.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/TrustedWifiCard.kt
+new file mode 100644
+index 0000000..57958be
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/TrustedWifiCard.kt
+@@ -0,0 +1,127 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.ui
++
++import android.Manifest
++import android.os.Build
++import androidx.activity.compose.rememberLauncherForActivityResult
++import androidx.activity.result.contract.ActivityResultContracts
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.padding
++import androidx.compose.material.icons.Icons
++import androidx.compose.material.icons.outlined.Delete
++import androidx.compose.material3.Card
++import androidx.compose.material3.CardDefaults
++import androidx.compose.material3.FilledTonalButton
++import androidx.compose.material3.Icon
++import androidx.compose.material3.IconButton
++import androidx.compose.material3.ListItem
++import androidx.compose.material3.ListItemDefaults
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.OutlinedTextField
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.unit.dp
++import io.nekohasekai.sfa.bitproxy.BitProxyPrefs
++import io.nekohasekai.sfa.bitproxy.WifiPermission
++
++/** Trusted Wi-Fi networks: everything goes Direct there (blocked apps stay blocked). */
++@Composable
++fun TrustedWifiCard() {
++    var networks by remember { mutableStateOf(BitProxyPrefs.trustedWifi) }
++    var typed by remember { mutableStateOf("") }
++    var permission by remember { mutableStateOf(WifiPermission.granted()) }
++    var note by remember { mutableStateOf<String?>(null) }
++
++    fun save(list: List<String>) {
++        networks = list.distinct().sorted()
++        BitProxyPrefs.trustedWifi = networks
++        note = "Takes effect after Apply."
++    }
++
++    // Background ("Allow all the time") must be asked for after foreground on Android 11+.
++    val backgroundLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
++        permission = WifiPermission.granted()
++    }
++    val foregroundLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
++        permission = WifiPermission.granted()
++        if (ok && !WifiPermission.background() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++            backgroundLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
++        }
++    }
++    fun requestPermission() = if (!WifiPermission.foreground()) {
++        foregroundLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
++    } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++        backgroundLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
++    } else {
++        Unit
++    }
++
++    Card(
++        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
++        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
++    ) {
++        Column(Modifier.padding(16.dp)) {
++            Text("Trusted Wi-Fi", style = MaterialTheme.typography.titleMedium)
++            Text(
++                "On these networks every app goes Direct (blocked apps stay blocked). sing-box checks the " +
++                    "network live, no reload when you join or leave. Needs location \"Allow all the time\" " +
++                    "because Android hides Wi-Fi names otherwise.",
++                style = MaterialTheme.typography.bodySmall,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++                modifier = Modifier.padding(vertical = 8.dp),
++            )
++            if (!permission) {
++                Text(
++                    if (networks.isEmpty()) "Location permission not granted yet." else "Location permission missing: Apply will refuse until it's granted.",
++                    style = MaterialTheme.typography.bodySmall,
++                    color = MaterialTheme.colorScheme.error,
++                )
++                TextButton(onClick = { requestPermission() }) { Text("Grant location permission") }
++            }
++        }
++        for (ssid in networks) {
++            ListItem(
++                headlineContent = { Text(ssid) },
++                trailingContent = {
++                    IconButton(onClick = { save(networks - ssid) }) { Icon(Icons.Outlined.Delete, contentDescription = "Remove") }
++                },
++                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
++            )
++        }
++        Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
++            Row(verticalAlignment = Alignment.CenterVertically) {
++                OutlinedTextField(
++                    value = typed,
++                    onValueChange = { typed = it },
++                    label = { Text("Wi-Fi name") },
++                    singleLine = true,
++                    modifier = Modifier.weight(1f),
++                )
++                TextButton(enabled = typed.isNotBlank(), onClick = {
++                    save(networks + typed.trim())
++                    typed = ""
++                }) { Text("Add") }
++            }
++            FilledTonalButton(modifier = Modifier.padding(top = 8.dp), onClick = {
++                val ssid = WifiPermission.currentSsid()
++                if (ssid != null) {
++                    save(networks + ssid)
++                } else {
++                    note = if (!WifiPermission.foreground()) "Grant location permission first." else "Not on Wi-Fi, or location is switched off."
++                    if (!WifiPermission.foreground()) requestPermission()
++                }
++            }) { Text("Add current Wi-Fi") }
++            note?.let { Text(it, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp)) }
++        }
++    }
++}
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
+index d049132..a31694c 100644
+--- a/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
+@@ -202,6 +202,21 @@ class ConfigGeneratorTest {
+         assertFalse(10123 in r.config["dns"]!!.jsonObject["rules"]!!.jsonArray[1].jsonObject["user_id"]!!.jsonArray.map { it.jsonPrimitive.content.toInt() })
+     }
+ 
++    @Test fun trustedWifiGoesDirectButBlockedStaysBlocked() {
++        val apps = twoServerApps.mapIndexed { i, a -> if (i == 2) a.copy(mode = Mode.BLOCK) else a }
++        val r = ok(GeneratorInput(servers("two-servers"), null, apps, trustedWifi = listOf(" Home ", "Home", "")))
++        val rules = r.config["route"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
++        val block = rules.indexOfFirst { it["action"]?.jsonPrimitive?.content == "reject" }
++        val wifi = rules.indexOfFirst { "wifi_ssid" in it }
++        val firstApp = rules.indexOfFirst { it["outbound"] != null && "user_id" in it }
++        assertTrue(block < wifi && wifi < firstApp)
++        assertEquals("Direct", rules[wifi]["outbound"]!!.jsonPrimitive.content)
++        assertEquals(listOf("Home"), rules[wifi]["wifi_ssid"]!!.jsonArray.map { it.jsonPrimitive.content })
++        val dns = r.config["dns"]!!.jsonObject["rules"]!!.jsonArray.map { it.jsonObject }
++        assertEquals("reject", dns[0]["action"]!!.jsonPrimitive.content)
++        assertEquals("local", dns[1]["server"]!!.jsonPrimitive.content)
++    }
++
+     @Test fun noServersIsAnError() {
+         assertTrue(ConfigGenerator.generate(GeneratorInput(emptyList(), null, twoServerApps)) is GenerateResult.Error)
+     }
+-- 
+2.55.0
+

@@ -1,0 +1,282 @@
+From 113fc5a517413503905916660c2aa12137643ab5 Mon Sep 17 00:00:00 2001
+From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 00:05:23 +0530
+Subject: [PATCH 07/35] bitproxy: Apply button with libbox check and restore
+
+Apply resolves live uids, generates the config, validates it with
+Libbox.checkConfig and only then writes it (atomically) into a Local
+profile named BitProxy, selects it and reloads the running service. On
+any error the running config is untouched and the error is shown. The
+config active before the latest Apply is kept and can be restored. The
+last result is recorded for diagnostics.
+---
+ .../sfa/bitproxy/BitProxyApplier.kt           | 134 ++++++++++++++++++
+ .../nekohasekai/sfa/bitproxy/BitProxyPrefs.kt |  16 ++-
+ .../sfa/bitproxy/ui/BitProxyScreen.kt         |  48 ++++++-
+ 3 files changed, 193 insertions(+), 5 deletions(-)
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+new file mode 100644
+index 0000000..66a0589
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+@@ -0,0 +1,134 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy
++
++import android.util.Log
++import io.nekohasekai.libbox.Libbox
++import io.nekohasekai.sfa.Application
++import io.nekohasekai.sfa.bg.BoxService
++import io.nekohasekai.sfa.bitproxy.config.ConfigGenerator
++import io.nekohasekai.sfa.bitproxy.config.GenerateResult
++import io.nekohasekai.sfa.bitproxy.config.GeneratorInput
++import io.nekohasekai.sfa.database.Profile
++import io.nekohasekai.sfa.database.ProfileManager
++import io.nekohasekai.sfa.database.Settings
++import io.nekohasekai.sfa.database.TypedProfile
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.delay
++import kotlinx.coroutines.sync.Mutex
++import kotlinx.coroutines.sync.withLock
++import kotlinx.coroutines.withContext
++import java.io.File
++
++/**
++ * Generate -> check with libbox -> save into the "BitProxy" profile -> select it -> reload.
++ * Any failure before the save leaves the running config untouched (fail safe).
++ */
++object BitProxyApplier {
++    private const val TAG = "BitProxy"
++    const val PROFILE_NAME = "BitProxy"
++    private val lock = Mutex() // Apply button, network changes and app installs may race
++
++    sealed interface Outcome {
++        data class Applied(val result: GenerateResult.Ok, val reloaded: Boolean) : Outcome
++
++        data class Failed(val message: String) : Outcome
++    }
++
++    /** The config that was active before the latest Apply (every saved config passed the check). */
++    private val previousFile get() = File(BitProxyStore.dir, "previous.json")
++
++    val hasPrevious: Boolean get() = previousFile.isFile
++
++    /** [serviceRunning]: reload the running service; otherwise just save and select. */
++    suspend fun apply(serviceRunning: Boolean, ipv6: Boolean = false): Outcome = lock.withLock {
++        withContext(Dispatchers.IO) {
++            val outcome = try {
++                applyLocked(serviceRunning, ipv6)
++            } catch (e: Exception) {
++                Log.e(TAG, "apply failed", e)
++                Outcome.Failed("Unexpected error: ${e.message ?: e.javaClass.simpleName}")
++            }
++            BitProxyPrefs.recordApply(outcome)
++            outcome
++        }
++    }
++
++    private suspend fun applyLocked(serviceRunning: Boolean, ipv6: Boolean): Outcome {
++        val servers = BitProxyStore.servers()
++        val routes = AppResolver.scan().routes(BitProxyPrefs.apps)
++        val result = ConfigGenerator.generate(GeneratorInput(servers.map { it.conf }, BitProxyPrefs.selectedServer, routes, ipv6))
++        if (result is GenerateResult.Error) return Outcome.Failed(result.message)
++        result as GenerateResult.Ok
++        val json = result.json
++
++        try {
++            Libbox.checkConfig(json)
++        } catch (e: Exception) {
++            return Outcome.Failed("sing-box rejected the generated config: ${e.message}")
++        }
++
++        val profile = ensureProfile()
++        val file = File(profile.typed.path)
++        val old = file.takeIf { it.isFile }?.readText()
++        if (old == json) return Outcome.Applied(result, activate(profile, serviceRunning))
++        if (old != null && old != "{}") previousFile.writeText(old)
++        writeAtomically(file, json)
++        Log.i(TAG, "applied: server=${result.selectedTag} tun=${result.tunAddresses} rules=${result.appRuleCount}")
++        return Outcome.Applied(result, activate(profile, serviceRunning))
++    }
++
++    /** Swaps the previous config back in (and keeps the current one as "previous"). Returns a message. */
++    suspend fun restorePrevious(serviceRunning: Boolean): String = lock.withLock {
++        withContext(Dispatchers.IO) {
++            try {
++                val json = previousFile.readText()
++                Libbox.checkConfig(json)
++                val profile = ensureProfile()
++                val file = File(profile.typed.path)
++                val current = file.takeIf { it.isFile }?.readText()
++                writeAtomically(file, json)
++                if (current != null && current != "{}") previousFile.writeText(current)
++                "Restored the previous config" + if (activate(profile, serviceRunning)) " and reloaded" else ""
++            } catch (e: Exception) {
++                "Could not restore: ${e.message}"
++            }
++        }
++    }
++
++    /** The profile BitProxy owns; recreated if the user deleted it. */
++    suspend fun ensureProfile(): Profile {
++        ProfileManager.get(BitProxyPrefs.profileId)?.let { return it }
++        val typed = TypedProfile().apply { type = TypedProfile.Type.Local }
++        val dir = File(Application.application.filesDir, "configs").apply { mkdirs() }
++        typed.path = File(dir, "${ProfileManager.nextFileID()}.json").path
++        val profile = Profile(name = PROFILE_NAME, typed = typed).apply { userOrder = ProfileManager.nextOrder() }
++        File(typed.path).writeText("{}")
++        return ProfileManager.create(profile).also { BitProxyPrefs.profileId = it.id }
++    }
++
++    /** Selects the profile and reloads the service if it is running. Returns true if reloaded. */
++    private suspend fun activate(profile: Profile, serviceRunning: Boolean): Boolean {
++        Settings.selectedProfile = profile.id
++        val modeChanged = Settings.rebuildServiceMode()
++        if (!serviceRunning) return false
++        if (modeChanged) {
++            // Switching from a proxy-only profile to VPN mode needs a full restart.
++            BoxService.stop()
++            delay(1500) // ponytail: fixed wait for the old service to stop; poll status if restarts race
++            BoxService.start()
++            return true
++        }
++        return runCatching { Libbox.newStandaloneCommandClient().serviceReload() }
++            .onFailure { Log.w(TAG, "reload failed", it) }
++            .isSuccess
++    }
++
++    private fun writeAtomically(file: File, text: String) {
++        val tmp = File(file.parentFile, file.name + ".tmp")
++        tmp.writeText(text)
++        if (!tmp.renameTo(file)) {
++            tmp.delete()
++            error("could not write ${file.path}")
++        }
++    }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+index c9d3dc7..50b54ae 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+@@ -38,12 +38,20 @@ object BitProxyPrefs {
+         }.toMap()
+         set(value) = prefs.edit { putStringSet("apps", value.map { (k, m) -> "$k=${m.name}" }.toSet()) }
+ 
+-    fun setApp(key: AppKey, mode: Mode?) {
+-        apps = apps.toMutableMap().apply { if (mode == null) remove(key) else put(key, mode) }
+-    }
+-
+     /** Id of the upstream profile that BitProxy writes its generated config into. */
+     var profileId: Long
+         get() = prefs.getLong("profile_id", -1)
+         set(value) = prefs.edit { putLong("profile_id", value) }
++
++    /** Last Apply result, shown on the Diagnostics screen. */
++    val lastApply: String? get() = prefs.getString("last_apply", null)
++
++    fun recordApply(outcome: BitProxyApplier.Outcome) {
++        val time = java.text.DateFormat.getDateTimeInstance().format(java.util.Date())
++        val text = when (outcome) {
++            is BitProxyApplier.Outcome.Applied -> "OK ($time): ${outcome.result.selectedTag}, ${outcome.result.appRuleCount} app rules"
++            is BitProxyApplier.Outcome.Failed -> "FAILED ($time): ${outcome.message}"
++        }
++        prefs.edit { putString("last_apply", text) }
++    }
+ }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+index f2f7268..bee7760 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+@@ -8,6 +8,7 @@ import androidx.compose.animation.core.tween
+ import androidx.compose.foundation.background
+ import androidx.compose.foundation.clickable
+ import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
+ import androidx.compose.foundation.layout.fillMaxSize
+ import androidx.compose.foundation.layout.fillMaxWidth
+ import androidx.compose.foundation.layout.padding
+@@ -20,6 +21,7 @@ import androidx.compose.material.icons.outlined.Delete
+ import androidx.compose.material.icons.outlined.FileOpen
+ import androidx.compose.material.icons.outlined.Shield
+ import androidx.compose.material3.AlertDialog
++import androidx.compose.material3.Button
+ import androidx.compose.material3.Card
+ import androidx.compose.material3.CardDefaults
+ import androidx.compose.material3.ExperimentalMaterial3Api
+@@ -47,6 +49,7 @@ import androidx.compose.ui.unit.dp
+ import androidx.navigation.NavController
+ import androidx.navigation.NavGraphBuilder
+ import androidx.navigation.compose.composable
++import io.nekohasekai.sfa.bitproxy.BitProxyApplier
+ import io.nekohasekai.sfa.bitproxy.BitProxyPrefs
+ import io.nekohasekai.sfa.bitproxy.BitProxyStore
+ import io.nekohasekai.sfa.bitproxy.StoredServer
+@@ -108,6 +111,7 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+     var selected by remember { mutableStateOf(BitProxyPrefs.selectedServer) }
+     var reload by remember { mutableIntStateOf(0) }
+     var message by remember { mutableStateOf<String?>(null) }
++    var applying by remember { mutableStateOf(false) }
+     var confirmDelete by remember { mutableStateOf<StoredServer?>(null) }
+     val appCounts = remember { BitProxyPrefs.apps.values.let { v -> v.count { it == BitProxyPrefs.Mode.VPN } to v.count { it == BitProxyPrefs.Mode.DIRECT } } }
+ 
+@@ -197,12 +201,54 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+             )
+         }
++        Card(
++            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
++            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
++        ) {
++            Column(Modifier.padding(16.dp)) {
++                Text("Config", style = MaterialTheme.typography.titleMedium)
++                Text(
++                    "Builds the sing-box config from your servers and app switches, checks it, " +
++                        "saves it as the \"BitProxy\" profile and reloads the VPN if it is running. " +
++                        "If the check fails, the running config is kept.",
++                    style = MaterialTheme.typography.bodySmall,
++                    color = MaterialTheme.colorScheme.onSurfaceVariant,
++                    modifier = Modifier.padding(vertical = 8.dp),
++                )
++                Row {
++                    Button(enabled = !applying && servers.isNotEmpty(), onClick = {
++                        applying = true
++                        scope.launch {
++                            message = when (val o = BitProxyApplier.apply(serviceStatus == Status.Started)) {
++                                is BitProxyApplier.Outcome.Failed -> "✗ " + o.message
++                                is BitProxyApplier.Outcome.Applied -> buildString {
++                                    append("✓ Config applied")
++                                    append(if (o.reloaded) " and VPN reloaded" else ". Start the VPN from the Dashboard")
++                                    append("\n\nServer: ${o.result.selectedTag}\nTUN: ${o.result.tunAddresses.joinToString()}\nDNS: ${o.result.dnsServer}\nApp rules: ${o.result.appRuleCount}")
++                                    o.result.warnings.forEach { append("\n\n⚠ $it") }
++                                }
++                            }
++                            applying = false
++                        }
++                    }) { Text(if (applying) "Applying…" else "Apply") }
++                    if (BitProxyApplier.hasPrevious) {
++                        TextButton(enabled = !applying, onClick = {
++                            applying = true
++                            scope.launch {
++                                message = BitProxyApplier.restorePrevious(serviceStatus == Status.Started)
++                                applying = false
++                            }
++                        }) { Text("Restore previous") }
++                    }
++                }
++            }
++        }
+     }
+ 
+     message?.let {
+         AlertDialog(
+             onDismissRequest = { message = null },
+-            title = { Text("Import") },
++            title = { Text("BitProxy") },
+             text = { Text(it) },
+             confirmButton = { TextButton(onClick = { message = null }) { Text("OK") } },
+         )
+-- 
+2.55.0
+
