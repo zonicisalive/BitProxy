@@ -1,7 +1,7 @@
 From 1c9cbc784f76d9cbf1e112c2855be625d41ed467 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Thu, 24 Sep 2026 23:47:06 +0530
-Subject: [PATCH 04/36] bitproxy: sing-box config generator with golden tests
+Subject: [PATCH 04/37] bitproxy: sing-box config generator with golden tests
 
 Builds the config that reference/conf-merger.py produced: one wireguard
 endpoint per server, VPN selector, per-app/clone selectors routed by

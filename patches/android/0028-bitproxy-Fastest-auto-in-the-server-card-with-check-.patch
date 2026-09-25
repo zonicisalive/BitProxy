@@ -1,7 +1,7 @@
 From a1a45eefa4eb5ba06d0eb8a316b0eac4e3470da5 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:36:12 +0530
-Subject: [PATCH 28/36] bitproxy: 'Fastest (auto)' in the server card with
+Subject: [PATCH 28/37] bitproxy: 'Fastest (auto)' in the server card with
  check interval
 
 The dashboard server card gets a 'Fastest (auto)' option (sing-box
