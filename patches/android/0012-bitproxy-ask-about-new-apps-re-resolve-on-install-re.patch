@@ -1,7 +1,7 @@
 From 99265d929a275c935bf9835927b22f575d5e077e Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:35:45 +0530
-Subject: [PATCH 12/38] bitproxy: ask about new apps, re-resolve on
+Subject: [PATCH 12/39] bitproxy: ask about new apps, re-resolve on
  install/remove
 
 While the VPN runs, BitProxy listens for package installs and removals:

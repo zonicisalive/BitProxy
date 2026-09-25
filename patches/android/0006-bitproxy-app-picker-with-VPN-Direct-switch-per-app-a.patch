@@ -1,7 +1,7 @@
 From d8a781b5616bdb8535cc0ced76533a454b538631 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Thu, 24 Sep 2026 23:59:57 +0530
-Subject: [PATCH 06/38] bitproxy: app picker with VPN/Direct switch per app and
+Subject: [PATCH 06/39] bitproxy: app picker with VPN/Direct switch per app and
  clone
 
 Lists apps with icons, search and a system-apps filter. Each app, clone

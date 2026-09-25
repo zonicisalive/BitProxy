@@ -1,7 +1,7 @@
 From 5f845654988a2106f5226bb3f9a673df5289b842 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 10:35:42 +0530
-Subject: [PATCH 35/38] bitproxy: About links point to the BitProxy repository
+Subject: [PATCH 35/39] bitproxy: About links point to the BitProxy repository
 
 Source Code and Documentation open github.com/zonicisalive/BitProxy
 (the README covers setup, features and troubleshooting) instead of the

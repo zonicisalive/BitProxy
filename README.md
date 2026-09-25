@@ -22,9 +22,13 @@ and installs it over the current version.
 - **Servers:** import WireGuard `.conf` files (any number). They're validated and stored in
   private app storage only. Pick a server, or choose **Fastest (auto)** with a check interval
   of 1–30 min. The Dashboard card shows latency, or "No response" when a server is down.
-- **Mullvad login:** enter your Mullvad account number, pick locations, and BitProxy adds one
-  server per city. It registers a single device (WireGuard key) on your account; **Log out**
-  removes it again. No files to download.
+- **VPN provider login:** get servers without downloading files. Log in, pick locations, and
+  BitProxy writes one server per location. **Log out** removes the key or device again.
+  - Mullvad (account number), IVPN (account ID), Private Internet Access (username and
+    password), AirVPN (API key), AzireVPN (username and password), NordVPN (access token
+    from Nord Account → Manual setup), Cloudflare WARP (free, no account).
+  - PIA forgets keys that stay unused for a while: if a PIA server stops working, choose its
+    locations again to register fresh keys.
 - **Share to import:** share a `.conf` file (or its text) to BitProxy, or open it with
   BitProxy from a file manager. It's imported and applied immediately.
 - **Apps:** a VPN / Direct / Block switch for each app, clone (user 999) and work profile,
@@ -55,8 +59,8 @@ and installs it over the current version.
 
 1. Install the APK from [Releases](https://github.com/zonicisalive/BitProxy/releases)
    (`…-arm64-v8a.apk` for current phones). Allow notifications.
-2. Settings → BitProxy → **Import .conf files** (or share them to BitProxy, or **Mullvad →
-   Log in**), then **Apps**, then **Apply**.
+2. Settings → BitProxy → **Import .conf files** (or share them to BitProxy, or log in under
+   **VPN providers**), then **Apps**, then **Apply**.
 3. Start the VPN from the Dashboard and allow the VPN request.
 4. Android: Settings → Network (on OxygenOS: Connection & sharing) → VPN → BitProxy ⚙ →
    **Always-on VPN** + **Block connections without VPN**. Turn Always-on off in other VPN

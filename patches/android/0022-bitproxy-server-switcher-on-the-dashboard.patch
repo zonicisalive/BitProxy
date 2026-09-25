@@ -1,7 +1,7 @@
 From 80d3249299639aa4cec6bd37e8f717dec9b8e569 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:16:18 +0530
-Subject: [PATCH 22/38] bitproxy: server switcher on the dashboard
+Subject: [PATCH 22/39] bitproxy: server switcher on the dashboard
 
 Dashboard card listing the imported servers with their latency from
 sing-box's URL test ('85 ms', or 'No response' in red when a server is

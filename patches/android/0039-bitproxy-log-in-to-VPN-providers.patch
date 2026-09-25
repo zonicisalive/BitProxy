@@ -1,0 +1,1739 @@
+From 5bce48ed9281cb496efa5c5f766b0787a9974fd0 Mon Sep 17 00:00:00 2001
+From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 20:28:31 +0530
+Subject: [PATCH 39/39] bitproxy: log in to VPN providers
+
+One card for providers with an API to get WireGuard servers: Mullvad
+(account number), IVPN (account ID, optional 2FA), Private Internet
+Access (username/password, addKey with PIA's own CA), AirVPN (API key,
+generated configs), AzireVPN (v3 token + IP), NordVPN (access token,
+NordLynx key) and Cloudflare WARP (anonymous registration).
+
+Each login writes plain .conf files into BitProxyStore, so the servers
+work like imported ones. Log out removes the key or device on the
+provider where it has one.
+---
+ .../io/nekohasekai/sfa/bitproxy/Mullvad.kt    | 197 ----------------
+ .../sfa/bitproxy/providers/AirVpn.kt          |  74 ++++++
+ .../sfa/bitproxy/providers/AzireVpn.kt        |  77 ++++++
+ .../sfa/bitproxy/providers/Ivpn.kt            |  92 ++++++++
+ .../sfa/bitproxy/providers/Mullvad.kt         | 111 +++++++++
+ .../sfa/bitproxy/providers/NordVpn.kt         |  72 ++++++
+ .../nekohasekai/sfa/bitproxy/providers/Pia.kt | 160 +++++++++++++
+ .../sfa/bitproxy/providers/Provider.kt        | 178 ++++++++++++++
+ .../sfa/bitproxy/providers/Warp.kt            | 108 +++++++++
+ .../sfa/bitproxy/ui/BitProxyScreen.kt         |   4 +-
+ .../sfa/bitproxy/ui/MullvadCard.kt            | 190 ---------------
+ .../sfa/bitproxy/ui/ProvidersCard.kt          | 223 ++++++++++++++++++
+ .../bitproxy/{ => providers}/MullvadTest.kt   |  20 +-
+ .../sfa/bitproxy/providers/ProvidersTest.kt   |  74 ++++++
+ 14 files changed, 1181 insertions(+), 399 deletions(-)
+ delete mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/Mullvad.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/AirVpn.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/AzireVpn.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Ivpn.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Mullvad.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/NordVpn.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Pia.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Provider.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Warp.kt
+ delete mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/MullvadCard.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/ProvidersCard.kt
+ rename app/src/test/java/io/nekohasekai/sfa/bitproxy/{ => providers}/MullvadTest.kt (69%)
+ create mode 100644 app/src/test/java/io/nekohasekai/sfa/bitproxy/providers/ProvidersTest.kt
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/Mullvad.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/Mullvad.kt
+deleted file mode 100644
+index f56a3a7..0000000
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/Mullvad.kt
++++ /dev/null
+@@ -1,197 +0,0 @@
+-// SPDX-License-Identifier: GPL-3.0-or-later
+-package io.nekohasekai.sfa.bitproxy
+-
+-import android.content.Context
+-import androidx.core.content.edit
+-import io.nekohasekai.sfa.Application
+-import io.nekohasekai.sfa.bitproxy.wireguard.Curve25519
+-import kotlinx.serialization.json.Json
+-import kotlinx.serialization.json.JsonElement
+-import kotlinx.serialization.json.JsonObject
+-import kotlinx.serialization.json.booleanOrNull
+-import kotlinx.serialization.json.buildJsonObject
+-import kotlinx.serialization.json.intOrNull
+-import kotlinx.serialization.json.jsonArray
+-import kotlinx.serialization.json.jsonObject
+-import kotlinx.serialization.json.jsonPrimitive
+-import kotlinx.serialization.json.put
+-import java.net.HttpURLConnection
+-import java.net.URL
+-
+-/**
+- * Mullvad login with the account number: registers one WireGuard key (a "device" on the account)
+- * and writes a .conf per chosen location into BitProxyStore, so the rest of BitProxy treats them
+- * like imported files. Uses Mullvad's public API, the same one their open-source apps use.
+- * All functions do network or file I/O: call them off the main thread.
+- */
+-object Mullvad {
+-    private const val API = "https://api.mullvad.net"
+-    private const val PORT = 51820
+-
+-    data class Relay(val hostname: String, val ipv4: String, val publicKey: String, val owned: Boolean, val weight: Int)
+-
+-    data class Location(val code: String, val country: String, val city: String, val relays: List<Relay>) {
+-        /** Also the file name, so the endpoint tag reads "mullvad-gothenburg-se". */
+-        val serverName get() = "Mullvad $city ${code.substringBefore('-').uppercase()}"
+-    }
+-
+-    data class Relays(val dns: String, val locations: List<Location>)
+-
+-    data class Device(val privateKey: String, val ipv4: String, val ipv6: String?)
+-
+-    class ApiException(message: String) : Exception(message)
+-
+-    private val prefs by lazy { Application.application.getSharedPreferences("bitproxy_mullvad", Context.MODE_PRIVATE) }
+-
+-    val account: String? get() = prefs.getString("account", null)
+-    val paidUntil: String? get() = prefs.getString("expiry", null)
+-    val locationCodes: Set<String> get() = prefs.getStringSet("locations", emptySet())!!
+-
+-    /** Logs in and makes sure this app's key is registered. Reuses the key if it's still on the account. */
+-    fun login(accountNumber: String) {
+-        val number = accountNumber.filter(Char::isDigit)
+-        if (number.length != 16) throw ApiException("A Mullvad account number has 16 digits.")
+-        val token = token(number)
+-        val oldKey = prefs.getString("private_key", null)?.takeIf { prefs.getString("account", null) == number }
+-        val existing = oldKey?.let { key ->
+-            val pub = Curve25519.publicKey(key)
+-            call("GET", "/accounts/v1/devices", token)!!.jsonArray.map { it.jsonObject }.firstOrNull { it.str("pubkey") == pub }?.let { key to it }
+-        }
+-        val (key, device) = existing ?: Curve25519.generate().let { pair ->
+-            val body = buildJsonObject {
+-                put("pubkey", pair.publicKey)
+-                put("hijack_dns", false)
+-            }
+-            pair.privateKey to call("POST", "/accounts/v1/devices", token, body.toString())!!.jsonObject
+-        }
+-        val expiry = runCatching { call("GET", "/accounts/v1/accounts/me", token)!!.jsonObject.str("expiry")?.substringBefore('T') }.getOrNull()
+-        prefs.edit {
+-            putString("account", number)
+-            putString("private_key", key)
+-            putString("device_id", device.str("id"))
+-            putString("ipv4", device.str("ipv4_address"))
+-            putString("ipv6", device.str("ipv6_address"))
+-            putString("expiry", expiry)
+-        }
+-        EventLog.log("Mullvad: logged in, device ${device.str("name") ?: "?"}")
+-    }
+-
+-    fun relays(): Relays = parseRelays(http("GET", "/app/v1/relays", null, null))
+-
+-    /** Replaces the Mullvad servers with one per chosen location. Returns the number written. */
+-    fun saveLocations(relays: Relays, codes: Set<String>): Int {
+-        val device = Device(
+-            prefs.getString("private_key", null) ?: throw ApiException("Log in to Mullvad first."),
+-            prefs.getString("ipv4", null)!!,
+-            prefs.getString("ipv6", null),
+-        )
+-        removeServers()
+-        val files = relays.locations.filter { it.code in codes }.mapNotNull { loc ->
+-            BitProxyStore.save("${loc.serverName}.conf", conf(loc.relays.first(), relays.dns, device).toByteArray()).file?.name
+-        }
+-        prefs.edit {
+-            putStringSet("locations", codes)
+-            putStringSet("files", files.toSet())
+-        }
+-        return files.size
+-    }
+-
+-    /** Removes this app's key from the account (frees a device slot) and the Mullvad servers. */
+-    fun logout() {
+-        val number = account
+-        val id = prefs.getString("device_id", null)
+-        if (number != null && id != null) {
+-            runCatching { call("DELETE", "/accounts/v1/devices/$id", token(number)) }
+-                .onFailure { EventLog.log("Mullvad: could not remove the device: ${it.message}") }
+-        }
+-        removeServers()
+-        prefs.edit { clear() }
+-        EventLog.log("Mullvad: logged out")
+-    }
+-
+-    private fun removeServers() {
+-        val files = prefs.getStringSet("files", emptySet())!!
+-        BitProxyStore.servers().filter { it.file.name in files }.forEach(BitProxyStore::delete)
+-    }
+-
+-    private fun token(number: String): String {
+-        val body = buildJsonObject { put("account_number", number) }
+-        return call("POST", "/auth/v1/token", null, body.toString())!!.jsonObject.str("access_token")
+-            ?: throw ApiException("Mullvad login failed.")
+-    }
+-
+-    fun conf(relay: Relay, dns: String, device: Device) = buildString {
+-        appendLine("[Interface]")
+-        appendLine("PrivateKey = ${device.privateKey}")
+-        appendLine("Address = " + listOfNotNull(device.ipv4, device.ipv6).joinToString(", "))
+-        appendLine("DNS = $dns")
+-        appendLine()
+-        appendLine("# ${relay.hostname}")
+-        appendLine("[Peer]")
+-        appendLine("PublicKey = ${relay.publicKey}")
+-        appendLine("AllowedIPs = 0.0.0.0/0, ::/0")
+-        appendLine("Endpoint = ${relay.ipv4}:$PORT")
+-    }
+-
+-    /** Active WireGuard relays grouped by city; within a city Mullvad-owned and higher weight first. */
+-    fun parseRelays(json: String): Relays {
+-        val root = Json.parseToJsonElement(json).jsonObject
+-        val names = root["locations"]!!.jsonObject
+-        val wg = root["wireguard"]!!.jsonObject
+-        val locations = wg["relays"]!!.jsonArray.map { it.jsonObject }
+-            .filter { it["active"]?.jsonPrimitive?.booleanOrNull == true }
+-            .groupBy { it.str("location") ?: "" }
+-            .mapNotNull { (code, list) ->
+-                val place = names[code]?.jsonObject ?: return@mapNotNull null
+-                val relays = list.mapNotNull { r ->
+-                    Relay(
+-                        r.str("hostname") ?: return@mapNotNull null,
+-                        r.str("ipv4_addr_in") ?: return@mapNotNull null,
+-                        r.str("public_key") ?: return@mapNotNull null,
+-                        r["owned"]?.jsonPrimitive?.booleanOrNull == true,
+-                        r["weight"]?.jsonPrimitive?.intOrNull ?: 0,
+-                    )
+-                }.sortedWith(compareByDescending<Relay> { it.owned }.thenByDescending { it.weight })
+-                if (relays.isEmpty()) null else Location(code, place.str("country") ?: code, place.str("city") ?: code, relays)
+-            }
+-            .sortedWith(compareBy({ it.country }, { it.city }))
+-        return Relays(wg.str("ipv4_gateway") ?: "10.64.0.1", locations)
+-    }
+-
+-    private fun JsonObject.str(key: String) = this[key]?.jsonPrimitive?.takeIf { it.isString }?.content
+-
+-    private fun call(method: String, path: String, token: String?, body: String? = null): JsonElement? =
+-        http(method, path, token, body).takeIf { it.isNotBlank() }?.let(Json::parseToJsonElement)
+-
+-    private fun http(method: String, path: String, token: String?, body: String?): String {
+-        val c = URL(API + path).openConnection() as HttpURLConnection
+-        try {
+-            c.requestMethod = method
+-            c.connectTimeout = 15_000
+-            c.readTimeout = 30_000
+-            c.setRequestProperty("Accept", "application/json")
+-            token?.let { c.setRequestProperty("Authorization", "Bearer $it") }
+-            if (body != null) {
+-                c.doOutput = true
+-                c.setRequestProperty("Content-Type", "application/json")
+-                c.outputStream.use { it.write(body.toByteArray()) }
+-            }
+-            val code = c.responseCode
+-            val text = (if (code < 400) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
+-            if (code >= 400) throw ApiException(errorMessage(code, text))
+-            return text
+-        } finally {
+-            c.disconnect()
+-        }
+-    }
+-
+-    private fun errorMessage(code: Int, text: String): String {
+-        val error = runCatching { Json.parseToJsonElement(text).jsonObject.str("code") }.getOrNull()
+-        return when (error) {
+-            "INVALID_ACCOUNT" -> "Wrong account number."
+-            "MAX_DEVICES_REACHED" -> "This account already has the maximum number of devices. Remove one at mullvad.net/account, then try again."
+-            "PUBKEY_IN_USE" -> "This key is already registered. Log out and log in again."
+-            else -> if (code == 429) "Too many attempts. Wait a minute and try again." else "Mullvad API error $code${error?.let { " ($it)" } ?: ""}."
+-        }
+-    }
+-}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/AirVpn.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/AirVpn.kt
+new file mode 100644
+index 0000000..669352b
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/AirVpn.kt
+@@ -0,0 +1,74 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.providers
++
++import kotlinx.serialization.json.jsonArray
++import kotlinx.serialization.json.jsonObject
++import java.net.URLEncoder
++import java.util.zip.ZipInputStream
++
++/**
++ * AirVPN: the API key from the Client Area. AirVPN creates the WireGuard keys itself (per device
++ * on its website), so its config generator returns finished .conf files.
++ */
++object AirVpn : Provider {
++    private const val API = "https://airvpn.org/api"
++    override val id = "airvpn"
++    override val name = "AirVPN"
++    override val fields = listOf(Field("key", "API key", secret = true), Field("device", "Device name (default: Default)", optional = true))
++    override val help = "AirVPN Client Area → API → enable and copy the key. The keys come from that AirVPN device; " +
++        "manage devices on airvpn.org."
++
++    override fun login(values: Map<String, String>, state: Provider.State) {
++        val key = values["key"].orEmpty()
++        checkError(Http.request("$API/userinfo/", headers = mapOf("API-KEY" to key), error = ::errorMessage))
++        state["key"] = key
++        state["device"] = values["device"]?.takeIf { it.isNotBlank() } ?: "Default"
++    }
++
++    override fun status(state: Provider.State) = "Device ${state["device"]}"
++
++    override fun locations(state: Provider.State) = parseStatus(Http.request("$API/status/", error = ::errorMessage))
++
++    /** Every server that isn't down; AirVPN names each server (e.g. "Achernar"). */
++    fun parseStatus(json: String) = Http.json(json).jsonObject["servers"]!!.jsonArray.map { it.jsonObject }
++        .filter { it.str("health") != "error" }
++        .mapNotNull { s ->
++            val name = s.str("public_name") ?: return@mapNotNull null
++            Location(name, "${s.str("country_name")} · ${s.str("location")} · $name", mapOf("name" to "AirVPN ${s.str("location")} $name"))
++        }.sortedBy { it.label }
++
++    override fun confs(state: Provider.State, picked: List<Location>): List<ServerConf> {
++        if (picked.isEmpty()) return emptyList()
++        val query = listOf(
++            "protocols" to "wireguard_1_udp_1637",
++            "servers" to picked.joinToString(",") { it.code },
++            "device" to (state["device"] ?: "Default"),
++            "system" to "linux",
++            "iplayer_entry" to "ipv4",
++            "iplayer_exit" to "ipv4",
++            "download" to "zip",
++        ).joinToString("&") { (k, v) -> "$k=${URLEncoder.encode(v, "UTF-8")}" }
++        val data = Http.bytes("$API/generator/?$query", headers = mapOf("API-KEY" to state.require("key")), error = ::errorMessage)
++        if (data.size < 2 || data[0] != 'P'.code.toByte() || data[1] != 'K'.code.toByte()) {
++            checkError(String(data))
++            throw ApiException("AirVPN returned no configs.")
++        }
++        val files = mutableListOf<Pair<String, String>>()
++        ZipInputStream(data.inputStream()).use { zip ->
++            generateSequence { zip.nextEntry }.filter { it.name.endsWith(".conf") }.forEach { files += it.name to zip.readBytes().decodeToString() }
++        }
++        // Match files to servers by name (files look like AirVPN_<Country>_<Server>_UDP-1637.conf).
++        return files.map { (file, text) ->
++            val loc = picked.firstOrNull { file.contains(it.code, ignoreCase = true) }
++            ServerConf(loc?.extra?.get("name") ?: file.substringAfterLast('/').removeSuffix(".conf"), text)
++        }
++    }
++
++    private fun checkError(text: String) {
++        runCatching { Http.json(text).jsonObject.str("error") }.getOrNull()?.let {
++            throw ApiException(if (it == "Not authorized") "Wrong API key, or the API is not enabled in the Client Area." else "AirVPN: $it")
++        }
++    }
++
++    private fun errorMessage(code: Int, text: String) = runCatching { Http.json(text).jsonObject.str("error") }.getOrNull()?.let { "AirVPN: $it" } ?: "AirVPN API error $code."
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/AzireVpn.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/AzireVpn.kt
+new file mode 100644
+index 0000000..0c5e841
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/AzireVpn.kt
+@@ -0,0 +1,77 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.providers
++
++import io.nekohasekai.sfa.bitproxy.wireguard.Curve25519
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.buildJsonObject
++import kotlinx.serialization.json.jsonArray
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import kotlinx.serialization.json.put
++
++/**
++ * AzireVPN API v3 (azirevpn.com/docs/api): username + password give a token; one registered key
++ * gets one tunnel IP that works at every location.
++ */
++object AzireVpn : Provider {
++    private const val API = "https://api.azirevpn.com/v3"
++    override val id = "azirevpn"
++    override val name = "AzireVPN"
++    override val fields = listOf(Field("username", "Username"), Field("password", "Password", secret = true))
++    override val help = "Adds one WireGuard key to your AzireVPN account. Log out here to remove it again."
++
++    override fun login(values: Map<String, String>, state: Provider.State) {
++        val body = buildJsonObject {
++            put("username", values["username"].orEmpty())
++            put("password", values["password"].orEmpty())
++            put("device_name", "BitProxy")
++        }
++        val token = data(api("POST", "/tokens", null, body.toString())).str("key") ?: throw ApiException("AzireVPN login failed.")
++        val pair = Curve25519.generate()
++        val ip = data(api("POST", "/ips", token, buildJsonObject { put("key", pair.publicKey) }.toString()))
++        state["token"] = token
++        state["username"] = values["username"]
++        state["ip_id"] = ip["id"]?.jsonPrimitive?.content
++        state["private_key"] = pair.privateKey
++        state["ipv4"] = ip.str("ipv4_address")?.let { "$it/32" } ?: throw ApiException("AzireVPN gave no tunnel address.")
++        state["ipv6"] = ip.str("ipv6_address")?.let { "$it/128" }
++        state["dns"] = ip["dns"]?.jsonArray?.joinToString(",") { it.jsonPrimitive.content }
++    }
++
++    override fun status(state: Provider.State) = state["username"]?.let { "User $it" }
++
++    override fun locations(state: Provider.State) = parseLocations(Http.request("$API/locations", error = ::errorMessage))
++
++    fun parseLocations(json: String) = Http.json(json).jsonObject["locations"]!!.jsonArray.map { it.jsonObject }.mapNotNull { l ->
++        val code = l.str("name") ?: return@mapNotNull null
++        Location(
++            code,
++            "${l.str("country")} · ${l.str("city")}",
++            mapOf("name" to "AzireVPN ${l.str("city")} ${code.substringBefore('-').uppercase()}", "host" to (l.str("pool") ?: return@mapNotNull null), "key" to (l.str("pubkey") ?: return@mapNotNull null)),
++        )
++    }.sortedBy { it.label }
++
++    override fun confs(state: Provider.State, picked: List<Location>) = picked.map { loc ->
++        val dns = state["dns"]?.split(',').orEmpty().ifEmpty { listOf("10.0.0.1") }
++        ServerConf(loc.extra.getValue("name"), wgConf(state.require("private_key"), listOfNotNull(state.require("ipv4"), state["ipv6"]), dns, loc.extra.getValue("key"), "${loc.extra.getValue("host")}:51820"))
++    }
++
++    override fun logout(state: Provider.State) {
++        val token = state["token"] ?: return
++        state["ip_id"]?.let { api("DELETE", "/ips/$it", token) }
++        api("DELETE", "/tokens", token)
++    }
++
++    /** The docs show bare objects, the official CLI reads .data: accept both. */
++    private fun data(o: JsonObject) = o["data"] as? JsonObject ?: o
++
++    private fun api(method: String, path: String, token: String?, body: String? = null) =
++        Http.request(API + path, method, token?.let { mapOf("Authorization" to "Bearer $it") }.orEmpty(), body, error = ::errorMessage)
++            .ifBlank { "{}" }.let { Http.json(it).jsonObject }
++
++    private fun errorMessage(code: Int, text: String) = when (code) {
++        401 -> "Wrong username or password."
++        429 -> "Too many attempts. Wait a minute and try again."
++        else -> runCatching { Http.json(text).jsonObject.str("message") }.getOrNull()?.let { "AzireVPN: $it" } ?: "AzireVPN API error $code."
++    }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Ivpn.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Ivpn.kt
+new file mode 100644
+index 0000000..75b6b53
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Ivpn.kt
+@@ -0,0 +1,92 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.providers
++
++import io.nekohasekai.sfa.bitproxy.wireguard.Curve25519
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.buildJsonObject
++import kotlinx.serialization.json.doubleOrNull
++import kotlinx.serialization.json.intOrNull
++import kotlinx.serialization.json.jsonArray
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import kotlinx.serialization.json.put
++
++/**
++ * IVPN (github.com/ivpn/desktop-app, daemon/api): the account ID opens a session that carries
++ * this app's WireGuard key; one tunnel IP for every server. Port 2049 is IVPN's default.
++ */
++object Ivpn : Provider {
++    private const val API = "https://api.ivpn.net"
++    override val id = "ivpn"
++    override val name = "IVPN"
++    override val fields = listOf(Field("account", "Account ID (i-XXXX-XXXX-XXXX)", secret = true), Field("code", "2FA code", optional = true))
++    override val help = "Opens one IVPN session (device). Log out here to close it again."
++
++    override fun login(values: Map<String, String>, state: Provider.State) {
++        val account = values["account"].orEmpty()
++        if (!Regex("""^(i-....-....-....|ivpn[a-zA-Z0-9]{7,8})$""").matches(account)) throw ApiException("An IVPN account ID looks like i-XXXX-XXXX-XXXX.")
++        val pair = Curve25519.generate()
++        val body = buildJsonObject {
++            put("username", account)
++            put("force", false)
++            put("wg_public_key", pair.publicKey)
++            values["code"]?.takeIf { it.isNotBlank() }?.let { put("confirmation", it) }
++        }
++        val r = api("/v4/session/new", body.toString())
++        state["token"] = r.str("token") ?: throw ApiException("IVPN login failed.")
++        state["account"] = account
++        state["private_key"] = pair.privateKey
++        state["ipv4"] = r["wireguard"]?.jsonObject?.str("ip_address")?.let { if ('/' in it) it else "$it/32" } ?: throw ApiException("IVPN gave no tunnel address.")
++        state["active_until"] = r["service_status"]?.jsonObject?.get("active_until")?.jsonPrimitive?.content?.toLongOrNull()
++            ?.let { java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.US).format(java.util.Date(it * 1000)) }
++    }
++
++    override fun status(state: Provider.State) =
++        "Account ••••${state["account"].orEmpty().takeLast(4)}" + (state["active_until"]?.let { " · active until $it" } ?: "")
++
++    override fun locations(state: Provider.State) = parseServers(Http.request("$API/v5/servers.json", error = { code, _ -> "IVPN API error $code." }))
++
++    /** One location per gateway (city); the least loaded host. */
++    fun parseServers(json: String) = Http.json(json).jsonObject["wireguard"]!!.jsonArray.map { it.jsonObject }.mapNotNull { g ->
++        val host = g["hosts"]?.jsonArray?.map { it.jsonObject }?.filter { it.str("host") != null && it.str("public_key") != null }
++            ?.minByOrNull { it["load"]?.jsonPrimitive?.doubleOrNull ?: 100.0 } ?: return@mapNotNull null
++        val city = g.str("city") ?: return@mapNotNull null
++        Location(
++            g.str("gateway") ?: return@mapNotNull null,
++            "${g.str("country")} · $city",
++            mapOf(
++                "name" to "IVPN $city ${g.str("country_code")}",
++                "host" to host.str("hostname").orEmpty(),
++                "ip" to host.str("host")!!,
++                "key" to host.str("public_key")!!,
++                "dns" to (host.str("local_ip")?.substringBefore('/') ?: "172.16.0.1"),
++            ),
++        )
++    }.sortedBy { it.label }
++
++    override fun confs(state: Provider.State, picked: List<Location>) = picked.map { loc ->
++        ServerConf(loc.extra.getValue("name"), wgConf(state.require("private_key"), listOf(state.require("ipv4")), listOf(loc.extra.getValue("dns")), loc.extra.getValue("key"), "${loc.extra.getValue("ip")}:2049", loc.extra["host"]))
++    }
++
++    override fun logout(state: Provider.State) {
++        val token = state["token"] ?: return
++        api("/v4/session/delete", buildJsonObject { put("session_token", token) }.toString())
++    }
++
++    /** IVPN answers errors with HTTP 400 and the real code in the body's "status". */
++    private fun api(path: String, body: String): JsonObject {
++        val r = Http.json(Http.request(API + path, "POST", body = body, error = { code, text -> errorMessage(runCatching { Http.json(text).jsonObject }.getOrNull(), code) })).jsonObject
++        if ((r["status"]?.jsonPrimitive?.intOrNull ?: 200) != 200) throw ApiException(errorMessage(r, 200))
++        return r
++    }
++
++    private fun errorMessage(r: JsonObject?, http: Int) = when (r?.get("status")?.jsonPrimitive?.intOrNull) {
++        401 -> "Wrong account ID."
++        602 -> "Too many devices on this IVPN account. Log out one in the IVPN app or at ivpn.net/account, then try again."
++        702 -> "This IVPN account is not active."
++        70001, 70002 -> "IVPN asks for a captcha. Log in once on ivpn.net, then try again here."
++        70011 -> "Enter your 2FA code."
++        70012 -> "Wrong 2FA code."
++        else -> r?.str("message")?.let { "IVPN: $it" } ?: "IVPN API error $http."
++    }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Mullvad.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Mullvad.kt
+new file mode 100644
+index 0000000..e9e0bb4
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Mullvad.kt
+@@ -0,0 +1,111 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.providers
++
++import io.nekohasekai.sfa.bitproxy.wireguard.Curve25519
++import kotlinx.serialization.json.booleanOrNull
++import kotlinx.serialization.json.buildJsonObject
++import kotlinx.serialization.json.intOrNull
++import kotlinx.serialization.json.jsonArray
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import kotlinx.serialization.json.put
++
++/**
++ * Mullvad: account number only. Registers one WireGuard key as a "device" on the account
++ * (max 5 per account), one server per chosen city. Public API used by Mullvad's own apps.
++ */
++object Mullvad : Provider {
++    private const val API = "https://api.mullvad.net"
++    override val id = "mullvad"
++    override val name = "Mullvad"
++    override val fields = listOf(Field("account", "Account number", secret = true))
++    override val help = "Adds one device to your Mullvad account. Log out here to remove it again."
++
++    override fun login(values: Map<String, String>, state: Provider.State) {
++        val number = values["account"].orEmpty().filter(Char::isDigit)
++        if (number.length != 16) throw ApiException("A Mullvad account number has 16 digits.")
++        val token = token(number)
++        // Same account again: reuse the key if its device still exists, so no extra device slot is used.
++        val oldKey = state["private_key"]?.takeIf { state["account"] == number }
++        val existing = oldKey?.let { key ->
++            val pub = Curve25519.publicKey(key)
++            api("GET", "/accounts/v1/devices", token).jsonArray.map { it.jsonObject }.firstOrNull { it.str("pubkey") == pub }?.let { key to it }
++        }
++        val (key, device) = existing ?: Curve25519.generate().let { pair ->
++            val body = buildJsonObject {
++                put("pubkey", pair.publicKey)
++                put("hijack_dns", false)
++            }
++            pair.privateKey to api("POST", "/accounts/v1/devices", token, body.toString()).jsonObject
++        }
++        state["account"] = number
++        state["private_key"] = key
++        state["device_id"] = device.str("id")
++        state["ipv4"] = device.str("ipv4_address")
++        state["ipv6"] = device.str("ipv6_address")
++        state["expiry"] = runCatching { api("GET", "/accounts/v1/accounts/me", token).jsonObject.str("expiry")?.substringBefore('T') }.getOrNull()
++    }
++
++    override fun status(state: Provider.State) =
++        "Account ••••${state["account"].orEmpty().takeLast(4)}" + (state["expiry"]?.let { " · paid until $it" } ?: "")
++
++    override fun locations(state: Provider.State) = parseRelays(Http.request("$API/app/v1/relays", error = ::errorMessage))
++
++    override fun confs(state: Provider.State, picked: List<Location>) = picked.map { loc ->
++        val addresses = listOfNotNull(state.require("ipv4"), state["ipv6"])
++        ServerConf(loc.extra.getValue("name"), wgConf(state.require("private_key"), addresses, listOf(loc.extra.getValue("dns")), loc.extra.getValue("key"), "${loc.extra.getValue("ip")}:51820", loc.extra["host"]))
++    }
++
++    override fun logout(state: Provider.State) {
++        val number = state["account"] ?: return
++        val id = state["device_id"] ?: return
++        api("DELETE", "/accounts/v1/devices/$id", token(number))
++    }
++
++    /** Active relays grouped by city; the best one per city (Mullvad-owned, then highest weight). */
++    fun parseRelays(json: String): List<Location> {
++        val root = Http.json(json).jsonObject
++        val names = root["locations"]!!.jsonObject
++        val wg = root["wireguard"]!!.jsonObject
++        val dns = wg.str("ipv4_gateway") ?: "10.64.0.1"
++        return wg["relays"]!!.jsonArray.map { it.jsonObject }
++            .filter { it["active"]?.jsonPrimitive?.booleanOrNull == true && it.str("ipv4_addr_in") != null && it.str("public_key") != null }
++            .groupBy { it.str("location") ?: "" }
++            .mapNotNull { (code, relays) ->
++                val place = names[code]?.jsonObject ?: return@mapNotNull null
++                val best = relays.sortedWith(
++                    compareByDescending<kotlinx.serialization.json.JsonObject> { it["owned"]?.jsonPrimitive?.booleanOrNull == true }
++                        .thenByDescending { it["weight"]?.jsonPrimitive?.intOrNull ?: 0 },
++                ).first()
++                val city = place.str("city") ?: code
++                Location(
++                    code,
++                    "${place.str("country") ?: code} · $city",
++                    mapOf(
++                        "name" to "Mullvad $city ${code.substringBefore('-').uppercase()}",
++                        "host" to best.str("hostname").orEmpty(),
++                        "ip" to best.str("ipv4_addr_in")!!,
++                        "key" to best.str("public_key")!!,
++                        "dns" to dns,
++                    ),
++                )
++            }
++            .sortedBy { it.label }
++    }
++
++    private fun token(number: String): String {
++        val body = buildJsonObject { put("account_number", number) }
++        return api("POST", "/auth/v1/token", null, body.toString()).jsonObject.str("access_token") ?: throw ApiException("Mullvad login failed.")
++    }
++
++    private fun api(method: String, path: String, token: String?, body: String? = null) =
++        Http.request(API + path, method, token?.let { mapOf("Authorization" to "Bearer $it") }.orEmpty(), body, error = ::errorMessage)
++            .ifBlank { "null" }.let(Http::json)
++
++    private fun errorMessage(code: Int, text: String): String = when (runCatching { Http.json(text).jsonObject.str("code") }.getOrNull()) {
++        "INVALID_ACCOUNT" -> "Wrong account number."
++        "MAX_DEVICES_REACHED" -> "This account already has the maximum number of devices. Remove one at mullvad.net/account, then try again."
++        "PUBKEY_IN_USE" -> "This key is already registered. Log out and log in again."
++        else -> if (code == 429) "Too many attempts. Wait a minute and try again." else "Mullvad API error $code."
++    }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/NordVpn.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/NordVpn.kt
+new file mode 100644
+index 0000000..1ab7dd5
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/NordVpn.kt
+@@ -0,0 +1,72 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.providers
++
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.intOrNull
++import kotlinx.serialization.json.jsonArray
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import java.net.URLEncoder
++import kotlin.io.encoding.Base64
++import kotlin.io.encoding.ExperimentalEncodingApi
++
++/**
++ * NordVPN (NordLynx): the access token from the Nord Account website returns the account's WireGuard
++ * private key; the tunnel address is the same (10.5.0.2) on every server. One recommended server per city.
++ */
++@OptIn(ExperimentalEncodingApi::class)
++object NordVpn : Provider {
++    private const val API = "https://api.nordvpn.com/v1"
++    override val id = "nordvpn"
++    override val name = "NordVPN"
++    override val fields = listOf(Field("token", "Access token", secret = true))
++    override val help = "Nord Account → NordVPN → Set up NordVPN manually → Access token → Generate new token. " +
++        "The servers keep working after the token expires; log in again to pick new ones."
++
++    override fun login(values: Map<String, String>, state: Provider.State) {
++        val token = values["token"].orEmpty()
++        val auth = "Basic " + Base64.encode("token:$token".toByteArray())
++        val creds = Http.json(Http.request("$API/users/services/credentials", headers = mapOf("Authorization" to auth), error = ::errorMessage)).jsonObject
++        state["private_key"] = creds.str("nordlynx_private_key") ?: throw ApiException("This NordVPN account has no NordLynx key.")
++        state["token_tail"] = token.takeLast(4)
++    }
++
++    override fun status(state: Provider.State) = state["token_tail"]?.let { "Token ••••$it" }
++
++    override fun locations(state: Provider.State) = parseCountries(Http.request("$API/servers/countries", error = ::errorMessage))
++
++    fun parseCountries(json: String) = Http.json(json).jsonArray.flatMap { c ->
++        val country = c.jsonObject
++        country["cities"]?.jsonArray.orEmpty().map { it.jsonObject }.map { city ->
++            Location(
++                city["id"]!!.jsonPrimitive.content,
++                "${country.str("name")} · ${city.str("name")}",
++                mapOf("name" to "NordVPN ${city.str("name")} ${country.str("code")}"),
++            )
++        }
++    }.sortedBy { it.label }
++
++    override fun confs(state: Provider.State, picked: List<Location>) = picked.mapNotNull { loc ->
++        val q = listOf(
++            "filters[servers_technologies][identifier]" to "wireguard_udp",
++            "filters[servers_technologies][pivot][status]" to "online",
++            "filters[country_city_id]" to loc.code,
++            "limit" to "1",
++        ).joinToString("&") { (k, v) -> URLEncoder.encode(k, "UTF-8") + "=" + v }
++        val server = Http.json(Http.request("$API/servers/recommendations?$q", error = ::errorMessage)).jsonArray.firstOrNull()?.jsonObject ?: return@mapNotNull null
++        ServerConf(loc.extra.getValue("name"), conf(state.require("private_key"), server) ?: return@mapNotNull null)
++    }
++
++    fun conf(privateKey: String, server: JsonObject): String? {
++        val key = server["technologies"]?.jsonArray?.map { it.jsonObject }?.firstOrNull { it.str("identifier") == "wireguard_udp" }
++            ?.get("metadata")?.jsonArray?.map { it.jsonObject }?.firstOrNull { it.str("name") == "public_key" }?.str("value") ?: return null
++        val ip = server.str("station") ?: return null
++        return wgConf(privateKey, listOf("10.5.0.2/32"), listOf("103.86.96.100", "103.86.99.100"), key, "$ip:51820", server.str("hostname"))
++    }
++
++    private fun errorMessage(code: Int, text: String) = when {
++        code == 400 || code == 401 -> "Wrong or expired access token."
++        code == 429 -> "Too many attempts. Wait a minute and try again."
++        else -> "NordVPN API error $code" + (runCatching { Http.json(text).jsonObject["errors"]?.jsonObject?.get("code")?.jsonPrimitive?.intOrNull }.getOrNull()?.let { " ($it)" } ?: "") + "."
++    }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Pia.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Pia.kt
+new file mode 100644
+index 0000000..31c81a7
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Pia.kt
+@@ -0,0 +1,160 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.providers
++
++import io.nekohasekai.sfa.bitproxy.wireguard.Curve25519
++import kotlinx.serialization.json.booleanOrNull
++import kotlinx.serialization.json.intOrNull
++import kotlinx.serialization.json.jsonArray
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import java.net.URLEncoder
++import java.security.KeyStore
++import java.security.cert.CertificateFactory
++import java.security.cert.X509Certificate
++import javax.net.ssl.HostnameVerifier
++import javax.net.ssl.SSLContext
++import javax.net.ssl.TrustManagerFactory
++
++/**
++ * Private Internet Access, as in PIA's own manual-connections scripts (github.com/pia-foss/manual-connections):
++ * username + password give a 24 h token; each server's addKey (port 1337, PIA's own CA) registers
++ * a key and returns that server's tunnel address. PIA forgets keys that stay unused for a while,
++ * so the password is kept to register fresh keys when you choose locations again.
++ */
++object Pia : Provider {
++    override val id = "pia"
++    override val name = "Private Internet Access"
++    override val fields = listOf(Field("username", "Username (p1234567)"), Field("password", "Password", secret = true))
++    override val help = "PIA forgets keys that stay unused for some time. If a PIA server stops working, " +
++        "open PIA here → Choose locations → Save to register new keys."
++
++    override fun login(values: Map<String, String>, state: Provider.State) {
++        state["token"] = token(values["username"].orEmpty(), values["password"].orEmpty())
++        state["token_time"] = System.currentTimeMillis().toString()
++        state["username"] = values["username"]
++        state["password"] = values["password"]
++    }
++
++    override fun status(state: Provider.State) = state["username"]?.let { "User $it" }
++
++    override fun locations(state: Provider.State) =
++        parseRegions(Http.request("https://serverlist.piaservers.net/vpninfo/servers/v6", error = { code, _ -> "PIA server list error $code." }))
++
++    /** The JSON is followed by a base64 signature (which never contains '}'). */
++    fun parseRegions(text: String) = Http.json(text.substring(0, text.lastIndexOf('}') + 1)).jsonObject["regions"]!!.jsonArray.map { it.jsonObject }
++        .filter { it["offline"]?.jsonPrimitive?.booleanOrNull != true }
++        .mapNotNull { r ->
++            val wg = r["servers"]?.jsonObject?.get("wg")?.jsonArray?.firstOrNull()?.jsonObject ?: return@mapNotNull null
++            val name = r.str("name") ?: return@mapNotNull null
++            Location(r.str("id") ?: return@mapNotNull null, name, mapOf("name" to "PIA $name", "ip" to (wg.str("ip") ?: return@mapNotNull null), "cn" to (wg.str("cn") ?: return@mapNotNull null)))
++        }.sortedBy { it.label }
++
++    override fun confs(state: Provider.State, picked: List<Location>): List<ServerConf> {
++        val token = freshToken(state)
++        return picked.map { loc ->
++            val pair = Curve25519.generate()
++            val ip = loc.extra.getValue("ip")
++            val cn = loc.extra.getValue("cn")
++            val url = "https://$ip:1337/addKey?pt=${URLEncoder.encode(token, "UTF-8")}&pubkey=${URLEncoder.encode(pair.publicKey, "UTF-8")}"
++            val r = Http.json(Http.request(url, socketFactory = tls.socketFactory, hostnameVerifier = verifier(cn), error = { code, _ -> "PIA ${loc.label}: addKey error $code." })).jsonObject
++            if (r.str("status") != "OK") throw ApiException("PIA ${loc.label}: ${r.str("message") ?: "addKey failed"}")
++            val peerIp = r.str("peer_ip") ?: throw ApiException("PIA ${loc.label}: no tunnel address.")
++            val dns = r["dns_servers"]?.jsonArray?.map { it.jsonPrimitive.content }.orEmpty().ifEmpty { listOf("10.0.0.243") }
++            val port = r["server_port"]?.jsonPrimitive?.intOrNull ?: 1337
++            ServerConf(
++                loc.extra.getValue("name"),
++                wgConf(pair.privateKey, listOf(if ('/' in peerIp) peerIp else "$peerIp/32"), dns.take(1), r.str("server_key") ?: throw ApiException("PIA: no server key."), "$ip:$port", cn, keepalive = 25),
++            )
++        }
++    }
++
++    private fun freshToken(state: Provider.State): String {
++        val age = System.currentTimeMillis() - (state["token_time"]?.toLongOrNull() ?: 0)
++        state["token"]?.takeIf { age < 20 * 3600_000L }?.let { return it }
++        return token(state.require("username"), state.require("password")).also {
++            state["token"] = it
++            state["token_time"] = System.currentTimeMillis().toString()
++        }
++    }
++
++    private fun token(username: String, password: String): String {
++        val boundary = "BitProxy" + System.nanoTime()
++        val body = buildString {
++            for ((k, v) in listOf("username" to username, "password" to password)) {
++                append("--$boundary\r\nContent-Disposition: form-data; name=\"$k\"\r\n\r\n$v\r\n")
++            }
++            append("--$boundary--\r\n")
++        }
++        val r = Http.request(
++            "https://www.privateinternetaccess.com/api/client/v2/token",
++            "POST",
++            body = body,
++            contentType = "multipart/form-data; boundary=$boundary",
++            error = { code, _ -> if (code == 401 || code == 403) "Wrong username or password." else "PIA login error $code." },
++        )
++        return Http.json(r).jsonObject.str("token") ?: throw ApiException("PIA login failed.")
++    }
++
++    /** Server names like "losangeles403" are not DNS names: compare the certificate's CN directly. */
++    private fun verifier(cn: String) = HostnameVerifier { _, session ->
++        val cert = session.peerCertificates.firstOrNull() as? X509Certificate
++        cert?.subjectX500Principal?.name?.split(',')?.map { it.trim() }?.any { it == "CN=$cn" } == true
++    }
++
++    private val tls by lazy {
++        val ca = CertificateFactory.getInstance("X.509").generateCertificate(CA.trim().byteInputStream())
++        val ks = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
++            load(null, null)
++            setCertificateEntry("pia", ca)
++        }
++        val tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(ks) }
++        SSLContext.getInstance("TLS").apply { init(null, tmf.trustManagers, null) }
++    }
++
++    /** github.com/pia-foss/manual-connections/blob/master/ca.rsa.4096.crt */
++    private const val CA = """
++-----BEGIN CERTIFICATE-----
++MIIHqzCCBZOgAwIBAgIJAJ0u+vODZJntMA0GCSqGSIb3DQEBDQUAMIHoMQswCQYD
++VQQGEwJVUzELMAkGA1UECBMCQ0ExEzARBgNVBAcTCkxvc0FuZ2VsZXMxIDAeBgNV
++BAoTF1ByaXZhdGUgSW50ZXJuZXQgQWNjZXNzMSAwHgYDVQQLExdQcml2YXRlIElu
++dGVybmV0IEFjY2VzczEgMB4GA1UEAxMXUHJpdmF0ZSBJbnRlcm5ldCBBY2Nlc3Mx
++IDAeBgNVBCkTF1ByaXZhdGUgSW50ZXJuZXQgQWNjZXNzMS8wLQYJKoZIhvcNAQkB
++FiBzZWN1cmVAcHJpdmF0ZWludGVybmV0YWNjZXNzLmNvbTAeFw0xNDA0MTcxNzQw
++MzNaFw0zNDA0MTIxNzQwMzNaMIHoMQswCQYDVQQGEwJVUzELMAkGA1UECBMCQ0Ex
++EzARBgNVBAcTCkxvc0FuZ2VsZXMxIDAeBgNVBAoTF1ByaXZhdGUgSW50ZXJuZXQg
++QWNjZXNzMSAwHgYDVQQLExdQcml2YXRlIEludGVybmV0IEFjY2VzczEgMB4GA1UE
++AxMXUHJpdmF0ZSBJbnRlcm5ldCBBY2Nlc3MxIDAeBgNVBCkTF1ByaXZhdGUgSW50
++ZXJuZXQgQWNjZXNzMS8wLQYJKoZIhvcNAQkBFiBzZWN1cmVAcHJpdmF0ZWludGVy
++bmV0YWNjZXNzLmNvbTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBALVk
++hjumaqBbL8aSgj6xbX1QPTfTd1qHsAZd2B97m8Vw31c/2yQgZNf5qZY0+jOIHULN
++De4R9TIvyBEbvnAg/OkPw8n/+ScgYOeH876VUXzjLDBnDb8DLr/+w9oVsuDeFJ9K
++V2UFM1OYX0SnkHnrYAN2QLF98ESK4NCSU01h5zkcgmQ+qKSfA9Ny0/UpsKPBFqsQ
++25NvjDWFhCpeqCHKUJ4Be27CDbSl7lAkBuHMPHJs8f8xPgAbHRXZOxVCpayZ2SND
++fCwsnGWpWFoMGvdMbygngCn6jA/W1VSFOlRlfLuuGe7QFfDwA0jaLCxuWt/BgZyl
++p7tAzYKR8lnWmtUCPm4+BtjyVDYtDCiGBD9Z4P13RFWvJHw5aapx/5W/CuvVyI7p
++Kwvc2IT+KPxCUhH1XI8ca5RN3C9NoPJJf6qpg4g0rJH3aaWkoMRrYvQ+5PXXYUzj
++tRHImghRGd/ydERYoAZXuGSbPkm9Y/p2X8unLcW+F0xpJD98+ZI+tzSsI99Zs5wi
++jSUGYr9/j18KHFTMQ8n+1jauc5bCCegN27dPeKXNSZ5riXFL2XX6BkY68y58UaNz
++meGMiUL9BOV1iV+PMb7B7PYs7oFLjAhh0EdyvfHkrh/ZV9BEhtFa7yXp8XR0J6vz
++1YV9R6DYJmLjOEbhU8N0gc3tZm4Qz39lIIG6w3FDAgMBAAGjggFUMIIBUDAdBgNV
++HQ4EFgQUrsRtyWJftjpdRM0+925Y6Cl08SUwggEfBgNVHSMEggEWMIIBEoAUrsRt
++yWJftjpdRM0+925Y6Cl08SWhge6kgeswgegxCzAJBgNVBAYTAlVTMQswCQYDVQQI
++EwJDQTETMBEGA1UEBxMKTG9zQW5nZWxlczEgMB4GA1UEChMXUHJpdmF0ZSBJbnRl
++cm5ldCBBY2Nlc3MxIDAeBgNVBAsTF1ByaXZhdGUgSW50ZXJuZXQgQWNjZXNzMSAw
++HgYDVQQDExdQcml2YXRlIEludGVybmV0IEFjY2VzczEgMB4GA1UEKRMXUHJpdmF0
++ZSBJbnRlcm5ldCBBY2Nlc3MxLzAtBgkqhkiG9w0BCQEWIHNlY3VyZUBwcml2YXRl
++aW50ZXJuZXRhY2Nlc3MuY29tggkAnS7684Nkme0wDAYDVR0TBAUwAwEB/zANBgkq
++hkiG9w0BAQ0FAAOCAgEAJsfhsPk3r8kLXLxY+v+vHzbr4ufNtqnL9/1Uuf8NrsCt
++pXAoyZ0YqfbkWx3NHTZ7OE9ZRhdMP/RqHQE1p4N4Sa1nZKhTKasV6KhHDqSCt/dv
++Em89xWm2MVA7nyzQxVlHa9AkcBaemcXEiyT19XdpiXOP4Vhs+J1R5m8zQOxZlV1G
++tF9vsXmJqWZpOVPmZ8f35BCsYPvv4yMewnrtAC8PFEK/bOPeYcKN50bol22QYaZu
++LfpkHfNiFTnfMh8sl/ablPyNY7DUNiP5DRcMdIwmfGQxR5WEQoHL3yPJ42LkB5zs
++6jIm26DGNXfwura/mi105+ENH1CaROtRYwkiHb08U6qLXXJz80mWJkT90nr8Asj3
++5xN2cUppg74nG3YVav/38P48T56hG1NHbYF5uOCske19F6wi9maUoto/3vEr0rnX
++JUp2KODmKdvBI7co245lHBABWikk8VfejQSlCtDBXn644ZMtAdoxKNfR2WTFVEwJ
++iyd1Fzx0yujuiXDROLhISLQDRjVVAvawrAtLZWYK31bY7KlezPlQnl/D9Asxe85l
++8jO5+0LdJ6VyOs/Hd4w52alDW/MFySDZSfQHMTIc30hLBJ8OnCEIvluVQQ2UQvoW
+++no177N9L2Y+M9TcTA62ZyMXShHQGeh20rb4kK8f+iFX8NxtdHVSkxMEFSfDDyQ=
++-----END CERTIFICATE-----
++"""
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Provider.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Provider.kt
+new file mode 100644
+index 0000000..24bb889
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Provider.kt
+@@ -0,0 +1,178 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.providers
++
++import android.content.Context
++import android.content.SharedPreferences
++import androidx.core.content.edit
++import io.nekohasekai.sfa.Application
++import io.nekohasekai.sfa.bitproxy.BitProxyStore
++import io.nekohasekai.sfa.bitproxy.EventLog
++import kotlinx.serialization.json.Json
++import kotlinx.serialization.json.JsonElement
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import java.net.HttpURLConnection
++import java.net.URL
++import javax.net.ssl.HostnameVerifier
++import javax.net.ssl.HttpsURLConnection
++import javax.net.ssl.SSLSocketFactory
++
++/** A login field; [secret] fields are masked. */
++data class Field(val key: String, val label: String, val secret: Boolean = false, val optional: Boolean = false)
++
++/** A place the user can pick. [extra] holds what the provider needs to build the conf later. */
++data class Location(val code: String, val label: String, val extra: Map<String, String> = emptyMap())
++
++/** A server to store: file name without .conf, and the wg-quick text. */
++data class ServerConf(val name: String, val text: String)
++
++class ApiException(message: String) : Exception(message)
++
++/**
++ * A VPN provider BitProxy can log in to. Each login stores what it needs in its own private
++ * [State]; the servers it produces are plain .conf files in BitProxyStore, so the rest of
++ * BitProxy treats them like imported files. All functions do network I/O: call them off the main thread.
++ */
++interface Provider {
++    val id: String
++    val name: String
++    val fields: List<Field>
++
++    /** Shown under the login fields: where to find the credentials, what the login does. */
++    val help: String
++
++    fun login(values: Map<String, String>, state: State)
++
++    /** Short account line, e.g. "Account ••••1234 · paid until 2026-10-01". */
++    fun status(state: State): String? = null
++
++    fun locations(state: State): List<Location>
++
++    fun confs(state: State, picked: List<Location>): List<ServerConf>
++
++    /** Undo the login on the provider's side (remove the key/device), if it has such a thing. */
++    fun logout(state: State) {}
++
++    class State(id: String) {
++        val prefs: SharedPreferences = Application.application.getSharedPreferences("bitproxy_provider_$id", Context.MODE_PRIVATE)
++        operator fun get(key: String): String? = prefs.getString(key, null)
++        operator fun set(key: String, value: String?) = prefs.edit { if (value == null) remove(key) else putString(key, value) }
++        fun require(key: String) = get(key) ?: throw ApiException("Log in first.")
++        val loggedIn get() = prefs.getBoolean("logged_in", false)
++    }
++}
++
++object Providers {
++    val all: List<Provider> = listOf(Mullvad, Ivpn, Pia, AirVpn, AzireVpn, NordVpn, Warp)
++
++    fun state(p: Provider) = Provider.State(p.id)
++
++    fun login(p: Provider, values: Map<String, String>) {
++        val s = state(p)
++        p.login(values.mapValues { it.value.trim() }, s)
++        s.prefs.edit { putBoolean("logged_in", true) }
++        EventLog.log("${p.name}: logged in")
++    }
++
++    fun pickedCodes(p: Provider): Set<String> = state(p).prefs.getStringSet("locations", emptySet())!!
++
++    /** Replaces this provider's servers with the picked locations. Returns the number saved. */
++    fun save(p: Provider, picked: List<Location>): Int {
++        val s = state(p)
++        val confs = p.confs(s, picked)
++        removeServers(s)
++        val files = confs.mapNotNull { BitProxyStore.save("${it.name}.conf", it.text.toByteArray()).file?.name }
++        s.prefs.edit {
++            putStringSet("locations", picked.map { it.code }.toSet())
++            putStringSet("files", files.toSet())
++        }
++        return files.size
++    }
++
++    fun logout(p: Provider) {
++        val s = state(p)
++        runCatching { p.logout(s) }.onFailure { EventLog.log("${p.name}: logout on the provider failed: ${it.message}") }
++        removeServers(s)
++        s.prefs.edit { clear() }
++        EventLog.log("${p.name}: logged out")
++    }
++
++    private fun removeServers(s: Provider.State) {
++        val files = s.prefs.getStringSet("files", emptySet())!!
++        BitProxyStore.servers().filter { it.file.name in files }.forEach(BitProxyStore::delete)
++    }
++}
++
++/** Small HTTP helper for provider APIs. Throws [ApiException] with [error] applied to 4xx/5xx bodies. */
++object Http {
++    fun request(
++        url: String,
++        method: String = "GET",
++        headers: Map<String, String> = emptyMap(),
++        body: String? = null,
++        contentType: String = "application/json",
++        socketFactory: SSLSocketFactory? = null,
++        hostnameVerifier: HostnameVerifier? = null,
++        error: (code: Int, body: String) -> String = { code, _ -> "HTTP error $code" },
++    ): String = String(bytes(url, method, headers, body, contentType, socketFactory, hostnameVerifier, error))
++
++    fun bytes(
++        url: String,
++        method: String = "GET",
++        headers: Map<String, String> = emptyMap(),
++        body: String? = null,
++        contentType: String = "application/json",
++        socketFactory: SSLSocketFactory? = null,
++        hostnameVerifier: HostnameVerifier? = null,
++        error: (code: Int, body: String) -> String = { code, _ -> "HTTP error $code" },
++    ): ByteArray {
++        val c = URL(url).openConnection() as HttpURLConnection
++        try {
++            if (c is HttpsURLConnection) {
++                socketFactory?.let { c.sslSocketFactory = it }
++                hostnameVerifier?.let { c.hostnameVerifier = it }
++            }
++            c.requestMethod = method
++            c.connectTimeout = 15_000
++            c.readTimeout = 30_000
++            c.setRequestProperty("Accept", "application/json")
++            headers.forEach { (k, v) -> c.setRequestProperty(k, v) }
++            if (body != null) {
++                c.doOutput = true
++                c.setRequestProperty("Content-Type", contentType)
++                c.outputStream.use { it.write(body.toByteArray()) }
++            }
++            val code = c.responseCode
++            val data = (if (code < 400) c.inputStream else c.errorStream)?.use { it.readBytes() } ?: ByteArray(0)
++            if (code >= 400) throw ApiException(error(code, String(data)))
++            return data
++        } catch (e: java.io.IOException) {
++            throw ApiException("Network error: ${e.message ?: e.javaClass.simpleName}")
++        } finally {
++            c.disconnect()
++        }
++    }
++
++    fun json(text: String): JsonElement = Json.parseToJsonElement(text)
++
++    fun form(vararg pairs: Pair<String, String>) = pairs.joinToString("&") { (k, v) -> "$k=${java.net.URLEncoder.encode(v, "UTF-8")}" }
++}
++
++fun JsonObject.str(key: String) = this[key]?.jsonPrimitive?.takeIf { it.isString }?.content
++
++/** Builds a wg-quick config. */
++fun wgConf(privateKey: String, addresses: List<String>, dns: List<String>, peerKey: String, endpoint: String, comment: String? = null, presharedKey: String? = null, mtu: Int? = null, keepalive: Int? = null) = buildString {
++    appendLine("[Interface]")
++    appendLine("PrivateKey = $privateKey")
++    appendLine("Address = " + addresses.joinToString(", "))
++    if (dns.isNotEmpty()) appendLine("DNS = " + dns.joinToString(", "))
++    mtu?.let { appendLine("MTU = $it") }
++    appendLine()
++    comment?.let { appendLine("# $it") }
++    appendLine("[Peer]")
++    appendLine("PublicKey = $peerKey")
++    presharedKey?.let { appendLine("PresharedKey = $it") }
++    appendLine("AllowedIPs = 0.0.0.0/0, ::/0")
++    appendLine("Endpoint = $endpoint")
++    keepalive?.let { appendLine("PersistentKeepalive = $it") }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Warp.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Warp.kt
+new file mode 100644
+index 0000000..2aab509
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/providers/Warp.kt
+@@ -0,0 +1,108 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.providers
++
++import io.nekohasekai.sfa.bitproxy.wireguard.Curve25519
++import kotlinx.serialization.json.buildJsonObject
++import kotlinx.serialization.json.jsonArray
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import kotlinx.serialization.json.put
++import java.net.InetAddress
++import java.net.Socket
++import javax.net.ssl.SSLSocket
++import javax.net.ssl.SSLSocketFactory
++
++/**
++ * Cloudflare WARP (free, no account): an anonymous registration, as done by wgcf. Not an official
++ * API: Cloudflare may change it. The version path and headers mimic the 1.1.1.1 Android app.
++ */
++object Warp : Provider {
++    // ponytail: pinned app version, update when Cloudflare starts refusing it (see github.com/ViRb3/wgcf)
++    private const val API = "https://api.cloudflareclient.com/v0a5641"
++    private val headers = mapOf(
++        "User-Agent" to "1.1.1.1/6.38.9-5641 (Android 16.0.0)",
++        "CF-Client-Version" to "a-6.38.9-5641",
++    )
++    override val id = "warp"
++    override val name = "Cloudflare WARP"
++    override val fields = emptyList<Field>()
++    override val help = "Free, no account. Registers this device with Cloudflare anonymously. " +
++        "WARP hides your traffic from the local network but uses the nearest Cloudflare location only."
++
++    override fun login(values: Map<String, String>, state: Provider.State) {
++        val pair = Curve25519.generate()
++        val body = buildJsonObject {
++            put("key", pair.publicKey)
++            put("install_id", "")
++            put("fcm_token", "")
++            put("tos", java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US).apply { timeZone = java.util.TimeZone.getTimeZone("UTC") }.format(java.util.Date()))
++            put("model", "PC")
++            put("serial_number", "")
++            put("locale", "en_US")
++            put("os_version", "16.0.0")
++            put("key_type", "curve25519")
++            put("tunnel_type", "wireguard")
++        }
++        val reg = Http.json(Http.request("$API/reg", "POST", headers, body.toString(), "application/json; charset=UTF-8", AppLikeTls, error = ::errorMessage)).jsonObject
++        val config = reg["config"]!!.jsonObject
++        val addresses = config["interface"]!!.jsonObject["addresses"]!!.jsonObject
++        val peer = config["peers"]!!.jsonArray.first().jsonObject
++        state["id"] = reg.str("id")
++        state["token"] = reg.str("token")
++        state["private_key"] = pair.privateKey
++        state["ipv4"] = addresses.str("v4")?.let { "$it/32" } ?: throw ApiException("WARP gave no tunnel address.")
++        state["ipv6"] = addresses.str("v6")?.let { "$it/128" }
++        state["peer_key"] = peer.str("public_key")
++        state["endpoint_v4"] = peer["endpoint"]?.jsonObject?.str("v4")?.substringBeforeLast(':')
++    }
++
++    override fun status(state: Provider.State) = "Registered"
++
++    override fun locations(state: Provider.State) = listOf(Location("nearest", "Nearest Cloudflare location"))
++
++    override fun confs(state: Provider.State, picked: List<Location>) = picked.map {
++        val host = state["endpoint_v4"]?.takeIf { it.isNotBlank() } ?: "162.159.192.1"
++        ServerConf(
++            "Cloudflare WARP",
++            wgConf(
++                state.require("private_key"),
++                listOfNotNull(state.require("ipv4"), state["ipv6"]),
++                listOf("1.1.1.1", "1.0.0.1"),
++                state.require("peer_key"),
++                "$host:2408",
++                mtu = 1280,
++            ),
++        )
++    }
++
++    override fun logout(state: Provider.State) {
++        val id = state["id"] ?: return
++        Http.request("$API/reg/$id", "DELETE", headers + ("Authorization" to "Bearer ${state["token"]}"), socketFactory = AppLikeTls, error = ::errorMessage)
++    }
++
++    private fun errorMessage(code: Int, text: String) = when (code) {
++        429 -> "Cloudflare refused the registration (429). Try again later."
++        else -> runCatching { Http.json(text).jsonObject["errors"]!!.jsonArray.first().jsonObject.str("message") }.getOrNull()?.let { "WARP: $it" } ?: "WARP API error $code."
++    }
++
++    /** Cloudflare refuses registrations whose TLS handshake doesn't look like its app: TLS 1.2, two AES-256-GCM suites. */
++    private object AppLikeTls : SSLSocketFactory() {
++        private val base = SSLSocketFactory.getDefault() as SSLSocketFactory
++        private val suites = arrayOf("TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384", "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384")
++
++        private fun Socket.tune() = apply {
++            (this as? SSLSocket)?.let { s ->
++                s.enabledProtocols = arrayOf("TLSv1.2")
++                s.enabledCipherSuites = suites.filter { it in s.supportedCipherSuites }.toTypedArray()
++            }
++        }
++
++        override fun getDefaultCipherSuites() = suites
++        override fun getSupportedCipherSuites() = suites
++        override fun createSocket(s: Socket, host: String, port: Int, autoClose: Boolean) = base.createSocket(s, host, port, autoClose).tune()
++        override fun createSocket(host: String, port: Int) = base.createSocket(host, port).tune()
++        override fun createSocket(host: String, port: Int, localHost: InetAddress, localPort: Int) = base.createSocket(host, port, localHost, localPort).tune()
++        override fun createSocket(host: InetAddress, port: Int) = base.createSocket(host, port).tune()
++        override fun createSocket(address: InetAddress, port: Int, localAddress: InetAddress, localPort: Int) = base.createSocket(address, port, localAddress, localPort).tune()
++    }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+index ebe89ed..2fba993 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+@@ -157,7 +157,7 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+             Text("Servers", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp, 16.dp, 16.dp, 4.dp))
+             if (servers.isEmpty()) {
+                 Text(
+-                    "No servers yet. Import WireGuard .conf files (for example from Proton VPN), share them to BitProxy, or log in to Mullvad below.",
++                    "No servers yet. Import WireGuard .conf files (for example from Proton VPN), share them to BitProxy, or log in to a VPN provider below.",
+                     style = MaterialTheme.typography.bodyMedium,
+                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                 )
+@@ -220,7 +220,7 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+                 Text("  Import .conf files")
+             }
+         }
+-        MullvadCard(onServersChanged = { reload++ })
++        ProvidersCard(onServersChanged = { reload++ })
+         Card(
+             modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/MullvadCard.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/MullvadCard.kt
+deleted file mode 100644
+index d88ce10..0000000
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/MullvadCard.kt
++++ /dev/null
+@@ -1,190 +0,0 @@
+-// SPDX-License-Identifier: GPL-3.0-or-later
+-package io.nekohasekai.sfa.bitproxy.ui
+-
+-import androidx.compose.foundation.clickable
+-import androidx.compose.foundation.layout.Column
+-import androidx.compose.foundation.layout.Row
+-import androidx.compose.foundation.layout.fillMaxWidth
+-import androidx.compose.foundation.layout.heightIn
+-import androidx.compose.foundation.layout.padding
+-import androidx.compose.foundation.lazy.LazyColumn
+-import androidx.compose.foundation.lazy.items
+-import androidx.compose.foundation.text.KeyboardOptions
+-import androidx.compose.material3.AlertDialog
+-import androidx.compose.material3.Card
+-import androidx.compose.material3.CardDefaults
+-import androidx.compose.material3.Checkbox
+-import androidx.compose.material3.FilledTonalButton
+-import androidx.compose.material3.MaterialTheme
+-import androidx.compose.material3.OutlinedTextField
+-import androidx.compose.material3.Text
+-import androidx.compose.material3.TextButton
+-import androidx.compose.runtime.Composable
+-import androidx.compose.runtime.getValue
+-import androidx.compose.runtime.mutableStateOf
+-import androidx.compose.runtime.remember
+-import androidx.compose.runtime.rememberCoroutineScope
+-import androidx.compose.runtime.setValue
+-import androidx.compose.ui.Alignment
+-import androidx.compose.ui.Modifier
+-import androidx.compose.ui.text.input.KeyboardType
+-import androidx.compose.ui.text.input.PasswordVisualTransformation
+-import androidx.compose.ui.unit.dp
+-import io.nekohasekai.sfa.bitproxy.Mullvad
+-import kotlinx.coroutines.Dispatchers
+-import kotlinx.coroutines.launch
+-import kotlinx.coroutines.withContext
+-
+-/** Mullvad login and location picker on the BitProxy screen. [onServersChanged] reloads the server list. */
+-@Composable
+-fun MullvadCard(onServersChanged: () -> Unit) {
+-    val scope = rememberCoroutineScope()
+-    var account by remember { mutableStateOf(Mullvad.account) }
+-    var busy by remember { mutableStateOf(false) }
+-    var error by remember { mutableStateOf<String?>(null) }
+-    var info by remember { mutableStateOf<String?>(null) }
+-    var loginOpen by remember { mutableStateOf(false) }
+-    var relays by remember { mutableStateOf<Mullvad.Relays?>(null) }
+-    var confirmLogout by remember { mutableStateOf(false) }
+-
+-    fun run(block: suspend () -> Unit) {
+-        busy = true
+-        error = null
+-        scope.launch {
+-            try {
+-                block()
+-            } catch (e: Exception) {
+-                error = e.message ?: e.javaClass.simpleName
+-            } finally {
+-                busy = false
+-            }
+-        }
+-    }
+-
+-    fun openLocations() = run { relays = withContext(Dispatchers.IO) { Mullvad.relays() } }
+-
+-    Card(
+-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+-    ) {
+-        Column(Modifier.padding(16.dp)) {
+-            Text("Mullvad", style = MaterialTheme.typography.titleMedium)
+-            val status = account?.let { "Account ••••${it.takeLast(4)}" + (Mullvad.paidUntil?.let { d -> " · paid until $d" } ?: "") }
+-                ?: "Log in with your account number to add Mullvad servers without downloading files."
+-            Text(
+-                status,
+-                style = MaterialTheme.typography.bodySmall,
+-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+-                modifier = Modifier.padding(vertical = 8.dp),
+-            )
+-            error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+-            Row {
+-                if (account == null) {
+-                    FilledTonalButton(enabled = !busy, onClick = { loginOpen = true }) { Text("Log in") }
+-                } else {
+-                    FilledTonalButton(enabled = !busy, onClick = { openLocations() }) { Text(if (busy) "Loading…" else "Choose locations") }
+-                    TextButton(enabled = !busy, onClick = { confirmLogout = true }) { Text("Log out") }
+-                }
+-            }
+-        }
+-    }
+-
+-    if (loginOpen) {
+-        var number by remember { mutableStateOf("") }
+-        AlertDialog(
+-            onDismissRequest = { if (!busy) loginOpen = false },
+-            title = { Text("Mullvad login") },
+-            text = {
+-                Column {
+-                    OutlinedTextField(
+-                        value = number,
+-                        onValueChange = { number = it.filter(Char::isDigit).take(16) },
+-                        label = { Text("Account number") },
+-                        singleLine = true,
+-                        visualTransformation = PasswordVisualTransformation(),
+-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+-                    )
+-                    Text(
+-                        "Adds one device to your account. Log out here to remove it again.",
+-                        style = MaterialTheme.typography.bodySmall,
+-                        modifier = Modifier.padding(top = 8.dp),
+-                    )
+-                    error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+-                }
+-            },
+-            confirmButton = {
+-                TextButton(enabled = !busy && number.length == 16, onClick = {
+-                    run {
+-                        withContext(Dispatchers.IO) { Mullvad.login(number) }
+-                        account = Mullvad.account
+-                        loginOpen = false
+-                        relays = withContext(Dispatchers.IO) { Mullvad.relays() }
+-                    }
+-                }) { Text(if (busy) "Logging in…" else "Log in") }
+-            },
+-            dismissButton = { TextButton(enabled = !busy, onClick = { loginOpen = false }) { Text("Cancel") } },
+-        )
+-    }
+-
+-    relays?.let { r ->
+-        var picked by remember(r) { mutableStateOf(Mullvad.locationCodes) }
+-        AlertDialog(
+-            onDismissRequest = { relays = null },
+-            title = { Text("Mullvad locations") },
+-            text = {
+-                LazyColumn(Modifier.heightIn(max = 420.dp)) {
+-                    items(r.locations, key = { it.code }) { loc ->
+-                        Row(
+-                            verticalAlignment = Alignment.CenterVertically,
+-                            modifier = Modifier.fillMaxWidth().clickable {
+-                                picked = if (loc.code in picked) picked - loc.code else picked + loc.code
+-                            },
+-                        ) {
+-                            Checkbox(checked = loc.code in picked, onCheckedChange = null, modifier = Modifier.padding(8.dp))
+-                            Text("${loc.country} · ${loc.city}")
+-                        }
+-                    }
+-                }
+-            },
+-            confirmButton = {
+-                TextButton(onClick = {
+-                    relays = null
+-                    run {
+-                        val n = withContext(Dispatchers.IO) { Mullvad.saveLocations(r, picked) }
+-                        onServersChanged()
+-                        info = "$n Mullvad server${if (n == 1) "" else "s"} saved. Tap Apply to use them."
+-                    }
+-                }) { Text("Save (${picked.size})") }
+-            },
+-            dismissButton = { TextButton(onClick = { relays = null }) { Text("Cancel") } },
+-        )
+-    }
+-
+-    if (confirmLogout) {
+-        AlertDialog(
+-            onDismissRequest = { confirmLogout = false },
+-            title = { Text("Log out of Mullvad?") },
+-            text = { Text("Removes this device from your Mullvad account and deletes the Mullvad servers here. Tap Apply afterwards.") },
+-            confirmButton = {
+-                TextButton(onClick = {
+-                    confirmLogout = false
+-                    run {
+-                        withContext(Dispatchers.IO) { Mullvad.logout() }
+-                        account = null
+-                        onServersChanged()
+-                    }
+-                }) { Text("Log out") }
+-            },
+-            dismissButton = { TextButton(onClick = { confirmLogout = false }) { Text("Cancel") } },
+-        )
+-    }
+-
+-    info?.let {
+-        AlertDialog(
+-            onDismissRequest = { info = null },
+-            title = { Text("Mullvad") },
+-            text = { Text(it) },
+-            confirmButton = { TextButton(onClick = { info = null }) { Text("OK") } },
+-        )
+-    }
+-}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/ProvidersCard.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/ProvidersCard.kt
+new file mode 100644
+index 0000000..d8c4327
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/ProvidersCard.kt
+@@ -0,0 +1,223 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.ui
++
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.heightIn
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.lazy.LazyColumn
++import androidx.compose.foundation.lazy.items
++import androidx.compose.material3.AlertDialog
++import androidx.compose.material3.Card
++import androidx.compose.material3.CardDefaults
++import androidx.compose.material3.Checkbox
++import androidx.compose.material3.ListItem
++import androidx.compose.material3.ListItemDefaults
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.OutlinedTextField
++import androidx.compose.material3.Text
++import androidx.compose.material3.TextButton
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableIntStateOf
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.rememberCoroutineScope
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.graphics.Color
++import androidx.compose.ui.text.input.PasswordVisualTransformation
++import androidx.compose.ui.unit.dp
++import io.nekohasekai.sfa.bitproxy.providers.Location
++import io.nekohasekai.sfa.bitproxy.providers.Provider
++import io.nekohasekai.sfa.bitproxy.providers.Providers
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.launch
++import kotlinx.coroutines.withContext
++
++/** Provider logins on the BitProxy screen. [onServersChanged] reloads the server list. */
++@Composable
++fun ProvidersCard(onServersChanged: () -> Unit) {
++    val scope = rememberCoroutineScope()
++    var refresh by remember { mutableIntStateOf(0) }
++    var busy by remember { mutableStateOf(false) }
++    var error by remember { mutableStateOf<String?>(null) }
++    var info by remember { mutableStateOf<String?>(null) }
++    var loginFor by remember { mutableStateOf<Provider?>(null) }
++    var manage by remember { mutableStateOf<Provider?>(null) }
++    var picking by remember { mutableStateOf<Pair<Provider, List<Location>>?>(null) }
++    var confirmLogout by remember { mutableStateOf<Provider?>(null) }
++
++    fun run(block: suspend () -> Unit) {
++        busy = true
++        error = null
++        scope.launch {
++            try {
++                block()
++            } catch (e: Exception) {
++                error = e.message ?: e.javaClass.simpleName
++            } finally {
++                busy = false
++                refresh++
++            }
++        }
++    }
++
++    fun openLocations(p: Provider) = run {
++        val list = withContext(Dispatchers.IO) { p.locations(Providers.state(p)) }
++        picking = p to list
++    }
++
++    Card(
++        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
++        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
++    ) {
++        Text("VPN providers", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp, 16.dp, 16.dp, 0.dp))
++        Text(
++            "Log in to get servers without downloading files.",
++            style = MaterialTheme.typography.bodySmall,
++            color = MaterialTheme.colorScheme.onSurfaceVariant,
++            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
++        )
++        if (loginFor == null && manage == null) error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 16.dp)) }
++        for (p in Providers.all) {
++            val state = remember(p, refresh) { Providers.state(p) }
++            val loggedIn = state.loggedIn
++            ListItem(
++                headlineContent = { Text(p.name) },
++                supportingContent = {
++                    Text(
++                        if (!loggedIn) "Not logged in" else listOfNotNull(runCatching { p.status(state) }.getOrNull(), "${Providers.pickedCodes(p).size} locations").joinToString(" · "),
++                    )
++                },
++                modifier = Modifier.clickable(enabled = !busy) {
++                    error = null
++                    if (loggedIn) manage = p else loginFor = p
++                },
++                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
++            )
++        }
++    }
++
++    loginFor?.let { p ->
++        val values = remember(p) { p.fields.associate { it.key to mutableStateOf("") } }
++        AlertDialog(
++            onDismissRequest = { if (!busy) loginFor = null },
++            title = { Text("${p.name} login") },
++            text = {
++                Column {
++                    for (f in p.fields) {
++                        OutlinedTextField(
++                            value = values.getValue(f.key).value,
++                            onValueChange = { values.getValue(f.key).value = it },
++                            label = { Text(f.label + if (f.optional) " (optional)" else "") },
++                            singleLine = true,
++                            visualTransformation = if (f.secret) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
++                            modifier = Modifier.padding(bottom = 8.dp),
++                        )
++                    }
++                    Text(p.help, style = MaterialTheme.typography.bodySmall)
++                    error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
++                }
++            },
++            confirmButton = {
++                val ready = p.fields.all { it.optional || values.getValue(it.key).value.isNotBlank() }
++                TextButton(enabled = !busy && ready, onClick = {
++                    run {
++                        withContext(Dispatchers.IO) { Providers.login(p, values.mapValues { it.value.value }) }
++                        loginFor = null
++                        openLocations(p)
++                    }
++                }) { Text(if (busy) "Logging in…" else if (p.fields.isEmpty()) "Register" else "Log in") }
++            },
++            dismissButton = { TextButton(enabled = !busy, onClick = { loginFor = null }) { Text("Cancel") } },
++        )
++    }
++
++    manage?.let { p ->
++        AlertDialog(
++            onDismissRequest = { if (!busy) manage = null },
++            title = { Text(p.name) },
++            text = {
++                Column {
++                    Text(runCatching { p.status(Providers.state(p)) }.getOrNull() ?: "Logged in")
++                    error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 8.dp)) }
++                }
++            },
++            confirmButton = {
++                TextButton(enabled = !busy, onClick = { openLocations(p) }) { Text(if (busy) "Loading…" else "Choose locations") }
++            },
++            dismissButton = {
++                TextButton(enabled = !busy, onClick = {
++                    manage = null
++                    confirmLogout = p
++                }) { Text("Log out") }
++            },
++        )
++    }
++
++    picking?.let { (p, list) ->
++        var picked by remember(p, list) { mutableStateOf(Providers.pickedCodes(p)) }
++        AlertDialog(
++            onDismissRequest = { picking = null },
++            title = { Text("${p.name} locations") },
++            text = {
++                LazyColumn(Modifier.heightIn(max = 420.dp)) {
++                    items(list, key = { it.code }) { loc ->
++                        Row(
++                            verticalAlignment = Alignment.CenterVertically,
++                            modifier = Modifier.fillMaxWidth().clickable {
++                                picked = if (loc.code in picked) picked - loc.code else picked + loc.code
++                            },
++                        ) {
++                            Checkbox(checked = loc.code in picked, onCheckedChange = null, modifier = Modifier.padding(8.dp))
++                            Text(loc.label)
++                        }
++                    }
++                }
++            },
++            confirmButton = {
++                TextButton(onClick = {
++                    picking = null
++                    manage = null
++                    run {
++                        val n = withContext(Dispatchers.IO) { Providers.save(p, list.filter { it.code in picked }) }
++                        onServersChanged()
++                        info = "$n ${p.name} server${if (n == 1) "" else "s"} saved. Tap Apply to use them."
++                    }
++                }) { Text("Save (${picked.size})") }
++            },
++            dismissButton = { TextButton(onClick = { picking = null }) { Text("Cancel") } },
++        )
++    }
++
++    confirmLogout?.let { p ->
++        AlertDialog(
++            onDismissRequest = { confirmLogout = null },
++            title = { Text("Log out of ${p.name}?") },
++            text = { Text("Removes this device from your ${p.name} account where possible and deletes its servers here. Tap Apply afterwards.") },
++            confirmButton = {
++                TextButton(onClick = {
++                    confirmLogout = null
++                    run {
++                        withContext(Dispatchers.IO) { Providers.logout(p) }
++                        onServersChanged()
++                    }
++                }) { Text("Log out") }
++            },
++            dismissButton = { TextButton(onClick = { confirmLogout = null }) { Text("Cancel") } },
++        )
++    }
++
++    info?.let {
++        AlertDialog(
++            onDismissRequest = { info = null },
++            title = { Text("BitProxy") },
++            text = { Text(it) },
++            confirmButton = { TextButton(onClick = { info = null }) { Text("OK") } },
++        )
++    }
++}
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/MullvadTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/providers/MullvadTest.kt
+similarity index 69%
+rename from app/src/test/java/io/nekohasekai/sfa/bitproxy/MullvadTest.kt
+rename to app/src/test/java/io/nekohasekai/sfa/bitproxy/providers/MullvadTest.kt
+index 1ce6be8..f90ff08 100644
+--- a/app/src/test/java/io/nekohasekai/sfa/bitproxy/MullvadTest.kt
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/providers/MullvadTest.kt
+@@ -1,5 +1,5 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+-package io.nekohasekai.sfa.bitproxy
++package io.nekohasekai.sfa.bitproxy.providers
+ 
+ import io.nekohasekai.sfa.bitproxy.wireguard.ParseResult
+ import io.nekohasekai.sfa.bitproxy.wireguard.WireGuardConfParser
+@@ -21,18 +21,18 @@ class MullvadTest {
+          ]}}
+     """.trimIndent()
+ 
+-    @Test fun activeRelaysByCityOwnedFirst() {
+-        val relays = Mullvad.parseRelays(json)
+-        assertEquals("10.64.0.1", relays.dns)
+-        val got = relays.locations.single()
+-        assertEquals("Mullvad Gothenburg SE", got.serverName)
+-        assertEquals(listOf("se-got-wg-002", "se-got-wg-001"), got.relays.map { it.hostname })
++    @Test fun bestActiveRelayPerCity() {
++        val got = Mullvad.parseRelays(json).single()
++        assertEquals("Sweden · Gothenburg", got.label)
++        assertEquals("Mullvad Gothenburg SE", got.extra["name"])
++        assertEquals("se-got-wg-002", got.extra["host"])
++        assertEquals("10.64.0.1", got.extra["dns"])
+     }
+ 
+     @Test fun confParses() {
+-        val loc = Mullvad.parseRelays(json).locations.single()
+-        val device = Mullvad.Device("+ZwootR5fY6py1jCqJ6S6drE2CQQttwt3S3IIPVukIM=", "10.68.1.2/32", "fc00:bbbb:bbbb:bb01::1:2/128")
+-        val r = WireGuardConfParser.parse(Mullvad.conf(loc.relays.first(), "10.64.0.1", device), "${loc.serverName}.conf") as ParseResult.Ok
++        val loc = Mullvad.parseRelays(json).single()
++        val text = wgConf("+ZwootR5fY6py1jCqJ6S6drE2CQQttwt3S3IIPVukIM=", listOf("10.68.1.2/32", "fc00:bbbb:bbbb:bb01::1:2/128"), listOf(loc.extra["dns"]!!), loc.extra["key"]!!, "${loc.extra["ip"]}:51820")
++        val r = WireGuardConfParser.parse(text, "${loc.extra["name"]}.conf") as ParseResult.Ok
+         assertEquals("Mullvad Gothenburg SE", r.conf.name)
+         assertEquals("192.0.2.2", r.conf.peers.single().host)
+         assertEquals(51820, r.conf.peers.single().port)
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/providers/ProvidersTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/providers/ProvidersTest.kt
+new file mode 100644
+index 0000000..baa1040
+--- /dev/null
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/providers/ProvidersTest.kt
+@@ -0,0 +1,74 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.providers
++
++import io.nekohasekai.sfa.bitproxy.wireguard.ParseResult
++import io.nekohasekai.sfa.bitproxy.wireguard.WireGuardConfParser
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++/** Parsers against trimmed copies of each provider's public API responses (dummy keys). */
++class ProvidersTest {
++    private val key1 = "+ZwootR5fY6py1jCqJ6S6drE2CQQttwt3S3IIPVukIM="
++    private val key2 = "ha4StsG0IysrJajzBTO1FDtTQSsP128CdQegmOFqp94="
++
++    private fun parses(text: String, name: String) = (WireGuardConfParser.parse(text, "$name.conf") as ParseResult.Ok).conf
++
++    @Test fun ivpnLeastLoadedHost() {
++        val json = """{"wireguard": [{"gateway": "ar.wg.ivpn.net", "country_code": "AR", "country": "Argentina", "city": "Buenos Aires", "hosts": [
++            {"hostname": "ar1.wg.ivpn.net", "host": "192.0.2.1", "public_key": "$key1", "local_ip": "172.16.0.1/12", "load": 58.9},
++            {"hostname": "ar2.wg.ivpn.net", "host": "192.0.2.2", "public_key": "$key2", "local_ip": "172.16.0.1/12", "load": 10.0}]}], "openvpn": [], "config": {}}"""
++        val loc = Ivpn.parseServers(json).single()
++        assertEquals("ar.wg.ivpn.net", loc.code)
++        assertEquals("192.0.2.2", loc.extra["ip"])
++        assertEquals("172.16.0.1", loc.extra["dns"])
++    }
++
++    @Test fun piaRegionsSkipOfflineAndSignature() {
++        val text = """{"groups": {}, "regions": [
++            {"id": "us_california", "name": "US California", "country": "US", "offline": false, "servers": {"wg": [{"ip": "192.0.2.5", "cn": "losangeles403"}]}},
++            {"id": "gone", "name": "Gone", "country": "XX", "offline": true, "servers": {"wg": [{"ip": "192.0.2.6", "cn": "gone1"}]}}]}
++            |
++            |c2lnbmF0dXJl""".trimMargin()
++        val loc = Pia.parseRegions(text).single()
++        assertEquals("us_california", loc.code)
++        assertEquals("losangeles403", loc.extra["cn"])
++    }
++
++    @Test fun airvpnSkipsBrokenServers() {
++        val json = """{"result": "ok", "servers": [
++            {"public_name": "Achernar", "country_name": "Switzerland", "location": "Zurich", "health": "warning"},
++            {"public_name": "Broken", "country_name": "Nowhere", "location": "X", "health": "error"}]}"""
++        val loc = AirVpn.parseStatus(json).single()
++        assertEquals("Achernar", loc.code)
++        assertEquals("AirVPN Zurich Achernar", loc.extra["name"])
++    }
++
++    @Test fun azireLocationsAndConf() {
++        val json = """{"status": "success", "locations": [{"name": "se-sto", "city": "Stockholm", "country": "Sweden", "iso": "se", "pool": "se-sto.azirevpn.net", "pubkey": "$key2"}]}"""
++        val loc = AzireVpn.parseLocations(json).single()
++        val conf = parses(wgConf(key1, listOf("10.0.5.6/32"), listOf("10.0.0.1"), loc.extra.getValue("key"), "${loc.extra["host"]}:51820"), loc.extra.getValue("name"))
++        assertEquals("se-sto.azirevpn.net", conf.peers.single().host)
++        assertEquals("AzireVPN Stockholm SE", conf.name)
++    }
++
++    @Test fun nordCitiesAndServerConf() {
++        val countries = """[{"id": 81, "name": "Germany", "code": "DE", "cities": [{"id": 2181458, "name": "Berlin"}, {"id": 2215709, "name": "Frankfurt"}]}]"""
++        val locs = NordVpn.parseCountries(countries)
++        assertEquals(listOf("2181458", "2215709"), locs.map { it.code })
++        val server = io.nekohasekai.sfa.bitproxy.providers.Http.json(
++            """{"hostname": "de1465.nordvpn.com", "station": "192.0.2.9", "technologies": [{"identifier": "openvpn_udp"},
++            {"identifier": "wireguard_udp", "metadata": [{"name": "public_key", "value": "$key2"}]}]}""",
++        ) as kotlinx.serialization.json.JsonObject
++        val conf = parses(NordVpn.conf(key1, server)!!, "NordVPN Berlin DE")
++        assertEquals("192.0.2.9", conf.peers.single().host)
++        assertEquals("10.5.0.2", conf.ipv4Address.address.toString())
++    }
++
++    @Test fun keepaliveAndMtu() {
++        val conf = parses(wgConf(key1, listOf("10.1.2.3/32"), listOf("10.0.0.243"), key2, "192.0.2.5:1337", mtu = 1280, keepalive = 25), "PIA test")
++        assertEquals(1280, conf.mtu)
++        assertEquals(25, conf.peers.single().persistentKeepalive)
++        assertTrue(conf.peers.single().port == 1337)
++    }
++}
+-- 
+2.55.0
+

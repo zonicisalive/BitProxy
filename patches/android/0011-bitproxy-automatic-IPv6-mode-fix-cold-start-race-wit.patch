@@ -1,7 +1,7 @@
 From d915bda4938bec5a08612fad4babfb4c394e3c96 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:29:44 +0530
-Subject: [PATCH 11/38] bitproxy: automatic IPv6 mode; fix cold-start race with
+Subject: [PATCH 11/39] bitproxy: automatic IPv6 mode; fix cold-start race with
  libbox setup
 
 Automatic IPv6 mode: while the VPN runs, watch the underlying network

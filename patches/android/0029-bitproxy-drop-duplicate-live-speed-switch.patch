@@ -1,7 +1,7 @@
 From 3fbaf543ab876fd1851822d47507437d1a6f4967 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:45:43 +0530
-Subject: [PATCH 29/38] bitproxy: drop duplicate live-speed switch
+Subject: [PATCH 29/39] bitproxy: drop duplicate live-speed switch
 
 Upstream's Settings > App > Notification already has 'Display realtime
 speed in notification'; the BitProxy notifications card now points
