@@ -58,6 +58,8 @@ jobs:
           SFA=${IN_SFA:-$SFA_COMMIT}
           GO=${IN_GO:-$GO_VERSION}
           TAG=$IN_TAG
+          # Build number: 1 + releases already published for this sing-box version (see build-release.sh)
+          BUILD=$(( $(gh release list -R "$GITHUB_REPOSITORY" --limit 200 --json tagName -q ".[].tagName" | grep -cE "^${CORE}(-r[0-9]+)?$" || true) + 1 ))
           if [ -z "$TAG" ]; then
             TAG=$CORE
             gh release view "$TAG" >/dev/null 2>&1 && TAG="$CORE-r$GITHUB_RUN_NUMBER"
@@ -67,10 +69,11 @@ jobs:
             echo "TRY_SFA_REF=$SFA"
             echo "GO_VERSION=$GO"
             echo "RELEASE_TAG=$TAG"
+            echo "BITPROXY_BUILD=$BUILD"
             echo "NDK_VERSION=$NDK_VERSION"
             echo "GOMOBILE_VERSION=$GOMOBILE_VERSION"
           } >> "$GITHUB_ENV"
-          echo "Building sing-box $CORE + SFA $SFA as $TAG"
+          echo "Building sing-box $CORE + SFA $SFA as $TAG (build $BUILD)"
 
       - uses: actions/setup-java@v4
         with:
@@ -127,4 +130,6 @@ jobs:
           body: |
             BitProxy built on sing-box ${{ env.TRY_SING_BOX_REF }} and sing-box-for-android ${{ env.TRY_SFA_REF }}, with the patches in this repository.
             Install `SFA-*-arm64-v8a.apk` on current phones (update in place: same signing key).
-          files: ${{ env.APK_DIR }}/*.apk
+          files: |
+            ${{ env.APK_DIR }}/*.apk
+            ${{ env.APK_DIR }}/SFA-version-metadata.json

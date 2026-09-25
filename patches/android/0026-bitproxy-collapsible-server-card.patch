@@ -1,7 +1,7 @@
 From 116643473a2f090fe32a0e903c6b4917be46d12f Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:31:52 +0530
-Subject: [PATCH 26/35] bitproxy: collapsible server card
+Subject: [PATCH 26/36] bitproxy: collapsible server card
 
 Tapping the server card header folds it to one line with the active
 server (and its latency when tested); the state is remembered.

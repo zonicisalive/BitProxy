@@ -1,7 +1,7 @@
 From 8b4430add828a3a0b7e04bc4ed549e66e7d60c03 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Thu, 24 Sep 2026 23:43:41 +0530
-Subject: [PATCH 03/35] bitproxy: WireGuard .conf parser with unit tests
+Subject: [PATCH 03/36] bitproxy: WireGuard .conf parser with unit tests
 
 Pure-Kotlin parser for wg-quick configs (Proton VPN exports and others),
 mirroring reference/conf-merger.py with added validation: BOM/CRLF,

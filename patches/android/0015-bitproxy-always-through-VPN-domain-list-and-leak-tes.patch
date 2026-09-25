@@ -1,7 +1,7 @@
 From 2ccbac3adf7a42b6b7e0db9b64f593082b0724f9 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:41:52 +0530
-Subject: [PATCH 15/35] bitproxy: 'always through VPN' domain list and leak
+Subject: [PATCH 15/36] bitproxy: 'always through VPN' domain list and leak
  test
 
 Optional list of domains (with subdomains) that use the VPN even from

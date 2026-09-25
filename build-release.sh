@@ -25,6 +25,15 @@ apply() { # repo dir, patch dir
 apply sing-box "$ROOT/patches/core"
 apply sing-box-for-android "$ROOT/patches/android"
 
+# BitProxy version code = upstream code * 1000 + build number (BITPROXY_BUILD, set by the release
+# workflow; 0 for local builds). It always grows, so the in-app updater offers patch-only releases.
+PROPS=sing-box-for-android/version.properties
+UP_CODE=$(sed -n 's/^VERSION_CODE=//p' $PROPS)
+VERSION_NAME=$(sed -n 's/^VERSION_NAME=//p' $PROPS)
+VERSION_CODE=$((UP_CODE * 1000 + ${BITPROXY_BUILD:-0} % 1000))
+sed -i "s/^VERSION_CODE=.*/VERSION_CODE=$VERSION_CODE/" $PROPS
+echo "BitProxy $VERSION_NAME, version code $VERSION_CODE"
+
 # build_libbox copies the .aar files into ../sing-box-for-android/app/libs when it exists
 mkdir -p sing-box-for-android/app/libs
 (cd sing-box && go run ./cmd/internal/build_libbox -target android)
@@ -41,5 +50,7 @@ else
   ./gradlew --no-daemon :app:testOtherDebugUnitTest :app:assembleOtherDebug
   OUT=app/build/outputs/apk/other/debug
 fi
-ls -la "$OUT"/*.apk
+# Read by the in-app updater (GitHubUpdateChecker) from each release.
+printf '{\n  "version_code": %s,\n  "version_name": "%s"\n}\n' "$VERSION_CODE" "$VERSION_NAME" > "$OUT/SFA-version-metadata.json"
+ls -la "$OUT"/*.apk "$OUT"/SFA-version-metadata.json
 echo "APK_DIR=$W/sing-box-for-android/$OUT" >> "${GITHUB_ENV:-/dev/null}"
