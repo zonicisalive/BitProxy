@@ -13,7 +13,7 @@ holds the BitProxy changes as `git format-patch` files. They're applied on top o
 App id: `com.zonicisalive.bitproxy`. It installs next to the official SFA app.
 
 **Download:** [Releases](https://github.com/zonicisalive/BitProxy/releases). Use
-`SFA-*-arm64-v8a.apk` for current phones. After that the app updates itself: it checks
+`BitProxy-*-arm64-v8a.apk` for current phones. After that the app updates itself: it checks
 these releases (Settings → App → Automatic Update Check), downloads the APK for your phone
 and installs it over the current version.
 

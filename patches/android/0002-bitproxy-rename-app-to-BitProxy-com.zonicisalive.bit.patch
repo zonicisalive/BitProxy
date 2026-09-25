@@ -1,7 +1,7 @@
 From deb3268ee38817f293dbe4ab010e127de377b1de Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Thu, 24 Sep 2026 23:37:14 +0530
-Subject: [PATCH 02/37] bitproxy: rename app to BitProxy
+Subject: [PATCH 02/38] bitproxy: rename app to BitProxy
  (com.zonicisalive.bitproxy)
 
 Only applicationId and the display name change; the Kotlin namespace

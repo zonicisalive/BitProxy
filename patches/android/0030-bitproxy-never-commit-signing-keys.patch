@@ -1,7 +1,7 @@
 From 5e975e80e80fb7d61dd0f01ee633b2e159e019a6 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:49:34 +0530
-Subject: [PATCH 30/37] bitproxy: never commit signing keys
+Subject: [PATCH 30/38] bitproxy: never commit signing keys
 
 ---
  .gitignore | 2 ++

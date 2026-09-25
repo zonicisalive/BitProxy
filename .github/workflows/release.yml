@@ -129,7 +129,7 @@ jobs:
           name: BitProxy ${{ env.RELEASE_TAG }}
           body: |
             BitProxy built on sing-box ${{ env.TRY_SING_BOX_REF }} and sing-box-for-android ${{ env.TRY_SFA_REF }}, with the patches in this repository.
-            Install `SFA-*-arm64-v8a.apk` on current phones (update in place: same signing key).
+            Install `BitProxy-*-arm64-v8a.apk` on current phones (update in place: same signing key).
           files: |
             ${{ env.APK_DIR }}/*.apk
-            ${{ env.APK_DIR }}/SFA-version-metadata.json
+            ${{ env.APK_DIR }}/*-version-metadata.json

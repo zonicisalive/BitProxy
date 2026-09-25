@@ -1,7 +1,7 @@
 From 113fc5a517413503905916660c2aa12137643ab5 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:05:23 +0530
-Subject: [PATCH 07/37] bitproxy: Apply button with libbox check and restore
+Subject: [PATCH 07/38] bitproxy: Apply button with libbox check and restore
 
 Apply resolves live uids, generates the config, validates it with
 Libbox.checkConfig and only then writes it (atomically) into a Local

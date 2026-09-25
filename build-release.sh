@@ -50,7 +50,9 @@ else
   ./gradlew --no-daemon :app:testOtherDebugUnitTest :app:assembleOtherDebug
   OUT=app/build/outputs/apk/other/debug
 fi
-# Read by the in-app updater (GitHubUpdateChecker) from each release.
-printf '{\n  "version_code": %s,\n  "version_name": "%s"\n}\n' "$VERSION_CODE" "$VERSION_NAME" > "$OUT/SFA-version-metadata.json"
-ls -la "$OUT"/*.apk "$OUT"/SFA-version-metadata.json
+# Read by the in-app updater (GitHubUpdateChecker) from each release. Builds before the rename
+# to BitProxy-* look for SFA-version-metadata.json, so publish that name too.
+printf '{\n  "version_code": %s,\n  "version_name": "%s"\n}\n' "$VERSION_CODE" "$VERSION_NAME" > "$OUT/BitProxy-version-metadata.json"
+cp "$OUT/BitProxy-version-metadata.json" "$OUT/SFA-version-metadata.json"
+ls -la "$OUT"/*.apk "$OUT"/*-version-metadata.json
 echo "APK_DIR=$W/sing-box-for-android/$OUT" >> "${GITHUB_ENV:-/dev/null}"

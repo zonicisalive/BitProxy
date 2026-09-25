@@ -1,7 +1,7 @@
 From 6455088b6b9ce3df8d4bcc3bd6d281ec6073ede8 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:19:47 +0530
-Subject: [PATCH 10/37] bitproxy: optional auto-pick fastest server
+Subject: [PATCH 10/38] bitproxy: optional auto-pick fastest server
 
 'Auto-pick fastest server' turns the VPN group into a sing-box urltest
 group. It only contains servers sharing the selected server's tunnel
