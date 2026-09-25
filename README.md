@@ -5,8 +5,7 @@ the Android client of [sing-box](https://github.com/SagerNet/sing-box) by
 [SagerNet](https://github.com/SagerNet). All the heavy lifting (the proxy engine, WireGuard,
 the VPN service and the app itself) is their work; BitProxy only adds a layer on top. It imports WireGuard configs (for example
 Proton VPN), gives every app and clone its own **VPN / Direct / Block** switch, and generates,
-checks and applies the sing-box config inside the app. It replaces the Termux script
-`conf-merger.py`. GPLv3, like upstream.
+checks and applies the sing-box config inside the app. GPLv3, like upstream.
 
 Upstream isn't stored in this repo. `versions.env` pins sing-box and SFA, and `patches/`
 holds the BitProxy changes as `git format-patch` files. They're applied on top of every build.
@@ -84,7 +83,6 @@ recovers from it, but the phone has no network in that time.
 | `check-upstream.sh` | Try all patches on a newer upstream: apply, build libbox + APK, run unit tests |
 | `export-patches.sh` | Regenerate `patches/` from the local `bitproxy` branches |
 | `make-keystore.sh` | Optional helper to create a release signing key |
-| `reference/` | `conf-merger.py`, the original script (not committed) |
 
 ## Building a signed APK
 
