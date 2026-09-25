@@ -1,6 +1,9 @@
 # BitProxy
 
-Personal fork of the sing-box Android app (SFA). It imports WireGuard configs (for example
+Personal fork of [sing-box for Android](https://github.com/SagerNet/sing-box-for-android) (SFA),
+the Android client of [sing-box](https://github.com/SagerNet/sing-box) by
+[SagerNet](https://github.com/SagerNet). All the heavy lifting (the proxy engine, WireGuard,
+the VPN service and the app itself) is their work; BitProxy only adds a layer on top. It imports WireGuard configs (for example
 Proton VPN), gives every app and clone its own **VPN / Direct / Block** switch, and generates,
 checks and applies the sing-box config inside the app. It replaces the Termux script
 `conf-merger.py`. GPLv3, like upstream.
@@ -178,3 +181,8 @@ sing-box and sing-box-for-android, which it is built from. The complete source o
 release is the upstream code at the versions in `versions.env` plus the patches in
 `patches/`. `build-release.sh` rebuilds it exactly. BitProxy isn't affiliated with or
 endorsed by SagerNet / sing-box; "sing-box" names the upstream project it's based on.
+
+Thanks to [nekohasekai](https://github.com/nekohasekai) and the
+[SagerNet](https://github.com/SagerNet) contributors for sing-box and its Android app, a
+great piece of free software. If BitProxy is useful to you, consider supporting
+[the upstream project](https://github.com/SagerNet/sing-box).
