@@ -36,7 +36,9 @@ echo "BitProxy $VERSION_NAME, version code $VERSION_CODE"
 
 # build_libbox copies the .aar files into ../sing-box-for-android/app/libs when it exists
 mkdir -p sing-box-for-android/app/libs
-(cd sing-box && go run ./cmd/internal/build_libbox -target android)
+# libbox is built with a Go whose timers count deep sleep (see go-boottime.sh).
+GO_BT=$("$ROOT/go-boottime.sh" "$W/go")
+(export GOROOT=$GO_BT PATH="$GO_BT/bin:$PATH" && cd sing-box && go run ./cmd/internal/build_libbox -target android)
 
 cd sing-box-for-android
 if [ -n "${RELEASE_KEYSTORE:-}" ]; then
