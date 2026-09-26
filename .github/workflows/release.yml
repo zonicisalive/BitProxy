@@ -25,6 +25,10 @@ on:
         description: "Release tag (default: the sing-box tag)"
         type: string
         default: ""
+      prerelease:
+        description: "Publish as a pre-release (Beta update track)"
+        type: boolean
+        default: false
     secrets:
       KEYSTORE_BASE64:
         required: true
@@ -82,8 +86,11 @@ jobs:
       - name: Release notes
         env:
           GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ inputs.prerelease }}
         run: |
-          PREV=$(gh release list -R "$GITHUB_REPOSITORY" --limit 1 --json tagName -q '.[0].tagName' || true)
+          # Stable notes compare with the last stable release, pre-release notes with the last release.
+          FILTER=$([ "$PRERELEASE" = true ] || echo --exclude-pre-releases)
+          PREV=$(gh release list -R "$GITHUB_REPOSITORY" $FILTER --limit 1 --json tagName -q '.[0].tagName' || true)
           NOTES=$RUNNER_TEMP/notes.md
           {
             echo "## What's new"
@@ -91,7 +98,7 @@ jobs:
             if [ -n "$PREV" ] && git rev-parse -q --verify "refs/tags/$PREV" >/dev/null; then
               git log "$PREV..HEAD" --no-merges --format='- %s' | grep -v '^- Update upstream to sing-box' || true
             fi
-            if [ -n "$PREV" ] && [ "${PREV%-r*}" != "$TRY_SING_BOX_REF" ]; then
+            if [ -n "$PREV" ] && [ "$(echo "$PREV" | sed 's/-r[0-9]*$//')" != "$TRY_SING_BOX_REF" ]; then
               echo "- sing-box $TRY_SING_BOX_REF ([changes](https://github.com/SagerNet/sing-box/releases/tag/$TRY_SING_BOX_REF))"
             fi
           } > "$NOTES"
@@ -157,6 +164,7 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: BitProxy ${{ env.RELEASE_TAG }}
           body_path: ${{ env.NOTES_FILE }}
+          prerelease: ${{ inputs.prerelease == true }}
           files: |
             ${{ env.APK_DIR }}/*.apk
             ${{ env.APK_DIR }}/*-version-metadata.json

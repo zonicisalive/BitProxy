@@ -1,7 +1,7 @@
 From e14cda3c39dd96e7193352748759e856579f0747 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Sat, 26 Sep 2026 17:46:46 +0530
-Subject: [PATCH 41/41] bitproxy: every sing-box server type, safer reloads,
+Subject: [PATCH 41/42] bitproxy: every sing-box server type, safer reloads,
  battery-friendly checks
 
 Servers:

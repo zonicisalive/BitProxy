@@ -14,8 +14,9 @@ App id: `com.zonicisalive.bitproxy`. It installs next to the official SFA app.
 
 **Download:** [Releases](https://github.com/zonicisalive/BitProxy/releases). Use
 `BitProxy-*-arm64-v8a.apk` for current phones. After that the app updates itself: it checks
-these releases (Settings → App → Automatic Update Check), downloads the APK for your phone
-and installs it over the current version.
+these releases (Settings → App → Automatic Update Check), shows what's new, downloads the
+APK for your phone and installs it over the current version. F-Droid isn't offered as an
+update source: it only has the original sing-box app.
 
 ## Features
 
@@ -111,6 +112,8 @@ recovers from it, but the phone has no network in that time.
 | `run.sh`, `gw` | Build + run on the emulator (never on a connected phone); Gradle with the right toolchain |
 | `check-upstream.sh` | Try all patches on a newer upstream: apply, build libbox + APK, run unit tests |
 | `export-patches.sh` | Regenerate `patches/` from the local `bitproxy` branches |
+| `find-sfa-commit.sh` | Finds the sing-box-for-android commit released as a given version (used by auto-update) |
+| `go-boottime.sh` | Go toolchain copy whose timers count deep sleep, used to build libbox |
 | `make-keystore.sh` | Optional helper to create a release signing key |
 
 `build-release.sh` needs Go, JDK 17, the Android SDK + NDK (`ANDROID_HOME`) and gomobile on
@@ -168,9 +171,17 @@ its own throwaway clone and deletes the copy afterwards.
 4. **Failure** (a patch conflict or a failing build/test): it opens an issue "BitProxy
    patches fail on sing-box v1.14.3" with a link to the log, and publishes nothing.
 
+**Beta track:** sing-box pre-releases (alpha, beta, rc) of a version with no stable release
+yet are built on the app's `dev` branch and published as GitHub **pre-releases**, only once
+the app has that exact version. In BitProxy, Settings → App → Update Track: **Stable** gets
+only stable releases; **Beta** also gets these pre-releases. A failing Beta build opens an
+issue and never affects Stable. `versions.env` always stays on stable.
+
+Every release lists what's new since the previous one (this repo's commits, plus the new
+sing-box version). The app's update prompt shows that list.
+
 Manual runs of **Release** use the tag from `versions.env`, or `v1.14.2-r<run>` when that
-release already exists (patch changes on the same upstream). Pre-releases (alpha, beta, rc)
-are never picked up automatically.
+release already exists (patch changes on the same upstream).
 
 ## Upgrading to a new upstream release by hand
 

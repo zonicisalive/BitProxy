@@ -1,7 +1,7 @@
 From 5bce48ed9281cb496efa5c5f766b0787a9974fd0 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 20:28:31 +0530
-Subject: [PATCH 39/41] bitproxy: log in to VPN providers
+Subject: [PATCH 39/42] bitproxy: log in to VPN providers
 
 One card for providers with an API to get WireGuard servers: Mullvad
 (account number), IVPN (account ID, optional 2FA), Private Internet

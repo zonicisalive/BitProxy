@@ -1,7 +1,7 @@
 From 8176dd11b9ebf228f4cc68f9a5277f27f6124a1c Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:39:03 +0530
-Subject: [PATCH 14/41] bitproxy: keep upstream update checker off
+Subject: [PATCH 14/42] bitproxy: keep upstream update checker off
 
 The GitHub update checker offers the official SFA APK, which has a
 different app id and signing key and cannot update BitProxy. Turn it

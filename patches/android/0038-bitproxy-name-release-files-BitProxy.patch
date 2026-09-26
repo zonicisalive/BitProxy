@@ -1,7 +1,7 @@
 From 93d35171c09df654252307e2bf21a10239c70e3e Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 20:00:40 +0530
-Subject: [PATCH 38/41] bitproxy: name release files BitProxy-*
+Subject: [PATCH 38/42] bitproxy: name release files BitProxy-*
 
 APKs are BitProxy-<version>-<abi>.apk and the updater reads
 BitProxy-version-metadata.json.
