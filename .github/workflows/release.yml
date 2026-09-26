@@ -44,6 +44,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags and history for the release notes
 
       - name: Versions
         env:
@@ -74,6 +76,33 @@ jobs:
             echo "GOMOBILE_VERSION=$GOMOBILE_VERSION"
           } >> "$GITHUB_ENV"
           echo "Building sing-box $CORE + SFA $SFA as $TAG (build $BUILD)"
+
+      # "What's new": this repo's commits since the last release, plus the sing-box version when it
+      # changed. The app's update prompt shows this text.
+      - name: Release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PREV=$(gh release list -R "$GITHUB_REPOSITORY" --limit 1 --json tagName -q '.[0].tagName' || true)
+          NOTES=$RUNNER_TEMP/notes.md
+          {
+            echo "## What's new"
+            echo
+            if [ -n "$PREV" ] && git rev-parse -q --verify "refs/tags/$PREV" >/dev/null; then
+              git log "$PREV..HEAD" --no-merges --format='- %s' | grep -v '^- Update upstream to sing-box' || true
+            fi
+            if [ -n "$PREV" ] && [ "${PREV%-r*}" != "$TRY_SING_BOX_REF" ]; then
+              echo "- sing-box $TRY_SING_BOX_REF ([changes](https://github.com/SagerNet/sing-box/releases/tag/$TRY_SING_BOX_REF))"
+            fi
+          } > "$NOTES"
+          [ "$(wc -l < "$NOTES")" -gt 2 ] || echo "- Rebuilt, no changes" >> "$NOTES"
+          {
+            echo
+            echo "Built on sing-box $TRY_SING_BOX_REF and sing-box-for-android $TRY_SFA_REF, with the patches in this repository."
+            echo 'Install `BitProxy-*-arm64-v8a.apk` on current phones (update in place: same signing key).'
+          } >> "$NOTES"
+          cat "$NOTES"
+          echo "NOTES_FILE=$NOTES" >> "$GITHUB_ENV"
 
       - uses: actions/setup-java@v4
         with:
@@ -127,9 +156,7 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           name: BitProxy ${{ env.RELEASE_TAG }}
-          body: |
-            BitProxy built on sing-box ${{ env.TRY_SING_BOX_REF }} and sing-box-for-android ${{ env.TRY_SFA_REF }}, with the patches in this repository.
-            Install `BitProxy-*-arm64-v8a.apk` on current phones (update in place: same signing key).
+          body_path: ${{ env.NOTES_FILE }}
           files: |
             ${{ env.APK_DIR }}/*.apk
             ${{ env.APK_DIR }}/*-version-metadata.json
