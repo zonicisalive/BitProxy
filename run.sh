@@ -3,7 +3,7 @@
 #   ./run.sh        rebuild the app only (Kotlin/UI changes)
 #   ./run.sh core   also rebuild libbox (Go changes in sing-box/)
 set -euo pipefail
-source /media/Absolute/dev/env.sh
+source "${DEV:-/media/Absolute/dev}/env.sh"
 # Only ever talk to the emulator, never to a phone that happens to be plugged in.
 export ANDROID_SERIAL=emulator-5554
 cd "$(dirname "$(readlink -f "$0")")/sing-box"

@@ -90,22 +90,26 @@ recovers from it, but the phone has no network in that time.
 | `build-release.sh` | Fresh clone of pinned upstream, apply patches, build libbox + APK, run unit tests |
 | `.github/workflows/release.yml` | The same build on GitHub, signed and published as a release |
 | `.github/workflows/auto-update.yml` | Daily: build and release new upstream versions automatically |
-| `setup-android-dev.sh` | One-time toolchain setup (Go, JDK 17, Android SDK/NDK, emulator) on `/media/Absolute/dev` |
+| `setup-android-dev.sh` | One-time toolchain setup (Go, JDK 17, Android SDK/NDK, emulator) into `$DEV` |
 | `run.sh`, `gw` | Build + run on the emulator (never on a connected phone); Gradle with the right toolchain |
 | `check-upstream.sh` | Try all patches on a newer upstream: apply, build libbox + APK, run unit tests |
 | `export-patches.sh` | Regenerate `patches/` from the local `bitproxy` branches |
 | `make-keystore.sh` | Optional helper to create a release signing key |
+
+`build-release.sh` needs Go, JDK 17, the Android SDK + NDK (`ANDROID_HOME`) and gomobile on
+`PATH`. The other helper scripts load `$DEV/env.sh`, which sets `JAVA_HOME`, `GOROOT`,
+`GOPATH`, `ANDROID_HOME` and the caches; point `DEV` at your own toolchain folder.
 
 ## Building a signed APK
 
 Create a key once and back it up; every update must be signed with the same key:
 
 ```bash
-keytool -genkeypair -keystore /media/Absolute/dev/mykeys/bitproxy.keystore \
+keytool -genkeypair -keystore path/to/bitproxy.keystore \
   -alias bitproxy -keyalg RSA -keysize 4096 -validity 36500
 ```
 
-Put the password in `/media/Absolute/dev/mykeys/signing.properties` (chmod 600):
+Put the passwords in a `signing.properties` next to it (chmod 600):
 
 ```
 KEYSTORE_PASS=...
@@ -116,10 +120,9 @@ ALIAS_PASS=...
 Build:
 
 ```bash
-source /media/Absolute/dev/env.sh
-RELEASE_KEYSTORE=/media/Absolute/dev/mykeys/bitproxy.keystore \
-LOCAL_PROPERTIES="$(cat /media/Absolute/dev/mykeys/signing.properties)" \
-WORK_DIR=/media/Absolute/dev/build-work ./build-release.sh
+RELEASE_KEYSTORE=path/to/bitproxy.keystore \
+LOCAL_PROPERTIES="$(cat path/to/signing.properties)" \
+./build-release.sh
 ```
 
 APKs end up in `build-work/sing-box-for-android/app/build/outputs/apk/other/release/`.
@@ -162,7 +165,7 @@ are never picked up automatically.
 2. Read the sing-box changelog for removed or deprecated config fields. Update
    `ConfigGenerator` and the golden tests if anything BitProxy writes changed.
 3. In the local checkouts: `git switch -c bitproxy-new <new tag / commit>` and
-   `git am -3 /home/zonic/BitProxy/patches/…/*.patch`. Fix conflicts, rebuild libbox, and
+   `git am -3 <this repo>/patches/…/*.patch`. Fix conflicts, rebuild libbox, and
    run the unit tests.
 4. Update `versions.env`, run `./export-patches.sh`, commit.
 

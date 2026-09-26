@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# One-time setup (no sudo) for building sing-box libbox + SFA Android app. Installs to /media/Absolute/dev.
+# One-time setup (no sudo) for building sing-box libbox + SFA Android app. Installs to $DEV (a folder with env.sh, see README).
 set -euo pipefail
-source /media/Absolute/dev/env.sh
+source "${DEV:-/media/Absolute/dev}/env.sh"
 SDK=$ANDROID_HOME; T=$(mktemp -d -p $DEV)
 mkdir -p "$SDK" "$ANDROID_AVD_HOME"
 

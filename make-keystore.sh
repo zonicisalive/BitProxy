@@ -2,8 +2,8 @@
 # Creates the BitProxy release signing key with a random password, stored next to it.
 # BACK UP the whole keys folder: if it is lost, updates can't be installed over the app.
 set -euo pipefail
-source /media/Absolute/dev/env.sh
-DIR=/media/Absolute/dev/keys
+source "${DEV:-/media/Absolute/dev}/env.sh"
+DIR=$DEV/keys
 KS=$DIR/bitproxy-release.keystore
 PROPS=$DIR/signing.properties
 mkdir -p "$DIR" && chmod 700 "$DIR"
