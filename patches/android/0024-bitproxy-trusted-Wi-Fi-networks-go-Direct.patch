@@ -1,7 +1,7 @@
 From 9d8a41e5b2f282accab3180626cbc6a27d491883 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:22:50 +0530
-Subject: [PATCH 24/39] bitproxy: trusted Wi-Fi networks go Direct
+Subject: [PATCH 24/41] bitproxy: trusted Wi-Fi networks go Direct
 
 List of Wi-Fi names (typed or 'Add current Wi-Fi') where every app goes
 Direct and DNS resolves locally; blocked apps stay blocked. Implemented

@@ -1,7 +1,7 @@
 From 9a4c656f4f7de408d9461bd44e90a87fc82dacd2 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:11:00 +0530
-Subject: [PATCH 08/39] bitproxy: service start fallback and failure
+Subject: [PATCH 08/41] bitproxy: service start fallback and failure
  notification
 
 - When the system starts the VPN (Always-on, boot) and no usable profile

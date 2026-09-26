@@ -19,9 +19,17 @@ and installs it over the current version.
 
 ## Features
 
-- **Servers:** import WireGuard `.conf` files (any number). They're validated and stored in
-  private app storage only. Pick a server, or choose **Fastest (auto)** with a check interval
-  of 1–30 min. The Dashboard card shows latency, or "No response" when a server is down.
+- **Servers:** every server type sing-box supports:
+  - WireGuard `.conf` files.
+  - OpenVPN `.ovpn` profiles. The username and password are added in the app.
+  - Share links: `vless://`, `vmess://`, `trojan://`, `ss://`, `hy2://`, `hysteria://`,
+    `tuic://`, `anytls://`, `socks://`, `http(s)://`, `naive+https://` and `ssh://`.
+  - Subscription URLs.
+  - sing-box JSON: single outbounds, or a whole config.
+
+  Import files, paste links, or share them to BitProxy. Everything is stored in private app
+  storage only. Pick a server, or choose **Fastest (auto)** with a check interval of 1–30 min.
+  The Dashboard card shows latency, or "No response" when a server is down.
 - **VPN provider login:** get servers without downloading files. Log in, pick locations, and
   BitProxy writes one server per location. **Log out** removes the key or device again.
   - Mullvad (account number), IVPN (account ID), Private Internet Access (username and
@@ -29,16 +37,16 @@ and installs it over the current version.
     from Nord Account → Manual setup), Cloudflare WARP (free, no account).
   - PIA forgets keys that stay unused for a while: if a PIA server stops working, choose its
     locations again to register fresh keys.
-- **Share to import:** share a `.conf` file (or its text) to BitProxy, or open it with
-  BitProxy from a file manager. It's imported and applied immediately.
+- **Share to import:** share a server file, links or a subscription URL to BitProxy, or
+  open a file with BitProxy from a file manager. It's imported and applied immediately.
 - **Apps:** a VPN / Direct / Block switch for each app, clone (user 999) and work profile,
   on the Dashboard and in the app picker. Rules match on Android user id, so reinstalled
   apps keep their setting. Blocked apps get no traffic and no DNS.
 - **Everything stays in the tunnel:** Android's per-app VPN exclude lists are never used, so
   Always-on with "Block connections without VPN" works for every app. The routing happens
   inside sing-box.
-- **No DNS leaks:** VPN apps resolve through the server's DNS inside the tunnel. Direct apps
-  use normal DNS.
+- **No DNS leaks:** VPN apps resolve through the server's DNS inside the tunnel (with other
+  server types: 1.1.1.1 over TCP through the server). Direct apps use normal DNS.
 - **Automatic IPv6:** on networks with real IPv6, the server's IPv6 address is added to the
   tunnel. Otherwise it runs IPv4-only.
 - **Trusted Wi-Fi:** networks where every app goes Direct (blocked apps stay blocked). Needs
@@ -50,8 +58,17 @@ and installs it over the current version.
   - Apply checks the config with sing-box before using it, and the previous config can be
     restored.
   - The Dashboard shows the Always-on / Block state, and asks before stopping under lockdown.
-  - **Recovery:** after 2+ minutes without any network, sing-box is restarted cleanly. If
-    stopping or restarting hangs, the process is ended and the VPN restarted.
+  - **Recovery:**
+    - WireGuard servers get a small in-tunnel check: every 3 min with the screen on,
+      every 15 min with it off, never in Doze, and right after unlocking. Two failures
+      in a row rebuild sing-box.
+    - After 2+ minutes without any network, sing-box is restarted cleanly.
+    - Every reload (Apply, an app installed or removed) is watched: a hang or a dead
+      tunnel afterwards restarts the VPN in a fresh process.
+    - If Android kills the app while the VPN runs, a backup alarm starts it again
+      within 30 min.
+    - libbox is built with a Go whose timers keep counting in deep sleep (as in
+      WireGuard's and Proton's apps), so the tunnel isn't stale after the night.
 - **Diagnostics:** tunnel, DNS, IPv6 and Always-on state, clone detection, last Apply, and a
   **Recent events** log that survives the night. The export removes all private keys.
 

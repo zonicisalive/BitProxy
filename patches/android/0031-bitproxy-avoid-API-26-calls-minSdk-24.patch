@@ -1,7 +1,7 @@
 From 1838a916924fe6439d56e764375557f7f5c2cb22 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:58:51 +0530
-Subject: [PATCH 31/39] bitproxy: avoid API 26 calls (minSdk 24)
+Subject: [PATCH 31/41] bitproxy: avoid API 26 calls (minSdk 24)
 
 Release lint (NewApi) caught ProcessBuilder.redirectOutput(File) and
 Process.waitFor(timeout) in the pm scan and log export; both need API

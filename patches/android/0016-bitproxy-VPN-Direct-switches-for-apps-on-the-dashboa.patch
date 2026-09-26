@@ -1,7 +1,7 @@
 From 00c7d9c182adba0567785f2079641f11dddc34f6 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:49:52 +0530
-Subject: [PATCH 16/39] bitproxy: VPN/Direct switches for apps on the dashboard
+Subject: [PATCH 16/41] bitproxy: VPN/Direct switches for apps on the dashboard
 
 New dashboard card listing every configured app and clone with a
 VPN/Direct switch and a shortcut to the full app picker. A flip is

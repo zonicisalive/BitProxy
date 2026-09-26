@@ -1,0 +1,1674 @@
+From e14cda3c39dd96e7193352748759e856579f0747 Mon Sep 17 00:00:00 2001
+From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
+Date: Sat, 26 Sep 2026 17:46:46 +0530
+Subject: [PATCH 41/41] bitproxy: every sing-box server type, safer reloads,
+ battery-friendly checks
+
+Servers:
+- Import share links (vless, vmess, trojan, ss, hysteria2/hy2, hysteria,
+  tuic, anytls, socks, http(s), naive, ssh), subscriptions (base64 or
+  plain, by URL), sing-box JSON (outbounds/endpoints or a whole config)
+  and OpenVPN .ovpn profiles (openvpn-client endpoint; username and
+  password are added in the app).
+- Non-WireGuard servers are stored as sing-box JSON, join the VPN group
+  with any TUN address, and resolve VPN-app DNS over TCP 1.1.1.1.
+  Selecting one uses the default TUN 172.19.0.1/30.
+- The diagnostics export also removes passwords, UUIDs and OpenVPN keys.
+
+Reliability:
+- Every reload (Apply, app installed/removed, IPv6) has a 20 s watchdog
+  and a traffic check 5 and 20 s later; a dead tunnel restarts the
+  process cleanly (at most every 10 min). Android doesn't restart a
+  killed VPN service, so a 30 min start alarm acts as a dead man's switch.
+- Health checks: every 3 min with the screen on, every 15 min with it
+  off, never in Doze, and right away when the screen turns on. Only for
+  WireGuard groups (not every proxy type carries UDP).
+- App installs and removals are written to the events log.
+
+UI: paste links/URL, server rows show the type, the Servers and Apps
+cards on the Dashboard start collapsed.
+---
+ .../io/nekohasekai/sfa/bitproxy/AppWatcher.kt |   2 +-
+ .../sfa/bitproxy/BitProxyApplier.kt           |  15 +-
+ .../nekohasekai/sfa/bitproxy/BitProxyPrefs.kt |  14 +-
+ .../sfa/bitproxy/BitProxyServiceHooks.kt      |  71 +++--
+ .../nekohasekai/sfa/bitproxy/BitProxyStore.kt | 116 ++++++--
+ .../io/nekohasekai/sfa/bitproxy/Redactor.kt   |   7 +-
+ .../sfa/bitproxy/ShareImportActivity.kt       |  11 +-
+ .../nekohasekai/sfa/bitproxy/TunnelHealth.kt  |  54 +++-
+ .../sfa/bitproxy/config/ConfigGenerator.kt    | 114 +++++--
+ .../sfa/bitproxy/servers/OpenVpnProfile.kt    | 141 +++++++++
+ .../sfa/bitproxy/servers/ServerImport.kt      |  79 +++++
+ .../sfa/bitproxy/servers/ShareLinks.kt        | 279 ++++++++++++++++++
+ .../sfa/bitproxy/ui/BitProxyScreen.kt         |  96 +++++-
+ .../sfa/bitproxy/ui/DiagnosticsScreen.kt      |   2 +-
+ .../nekohasekai/sfa/bitproxy/RedactorTest.kt  |   9 +
+ .../bitproxy/config/ConfigGeneratorTest.kt    |  27 ++
+ .../bitproxy/servers/OpenVpnProfileTest.kt    |  58 ++++
+ .../sfa/bitproxy/servers/ShareLinksTest.kt    |  84 ++++++
+ 18 files changed, 1072 insertions(+), 107 deletions(-)
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/servers/OpenVpnProfile.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/servers/ServerImport.kt
+ create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/servers/ShareLinks.kt
+ create mode 100644 app/src/test/java/io/nekohasekai/sfa/bitproxy/servers/OpenVpnProfileTest.kt
+ create mode 100644 app/src/test/java/io/nekohasekai/sfa/bitproxy/servers/ShareLinksTest.kt
+
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppWatcher.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppWatcher.kt
+index 7e31f33..b030a02 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppWatcher.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/AppWatcher.kt
+@@ -106,7 +106,7 @@ object AppWatcher {
+         pendingApply = scope.launch {
+             delay(3000)
+             if (Settings.selectedProfile != BitProxyPrefs.profileId) return@launch
+-            Log.i(TAG, "re-applying: $reason")
++            EventLog.log("re-applying: $reason")
+             BitProxyApplier.apply(serviceRunning = true)
+         }
+     }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+index ba4d744..36e8a25 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyApplier.kt
+@@ -64,10 +64,16 @@ object BitProxyApplier {
+         }
+         val servers = BitProxyStore.servers()
+         val routes = AppResolver.scan().routes(BitProxyPrefs.apps)
+-        var result = when (val r = ConfigGenerator.generate(GeneratorInput(servers.map { it.conf }, BitProxyPrefs.selectedServer, routes, ipv6, BitProxyPrefs.autoPick, BitProxyPrefs.autoPickMinutes, BitProxyPrefs.vpnDomains, BitProxyPrefs.trustedWifi))) {
++        val waiting = servers.filter { it.needsLogin }
++        val input = GeneratorInput(
++            servers.mapNotNull { it.conf }, BitProxyPrefs.selectedServer, routes, ipv6, BitProxyPrefs.autoPick, BitProxyPrefs.autoPickMinutes,
++            BitProxyPrefs.vpnDomains, BitProxyPrefs.trustedWifi, servers.filter { !it.needsLogin }.mapNotNull { it.proxy },
++        )
++        var result = when (val r = ConfigGenerator.generate(input)) {
+             is GenerateResult.Error -> return Outcome.Failed(r.message)
+             is GenerateResult.Ok -> r
+         }
++        if (waiting.isNotEmpty()) result = result.copy(warnings = result.warnings + "Left out until you add their username and password: ${waiting.joinToString { it.tag }}")
+         val json = result.json
+ 
+         try {
+@@ -87,6 +93,7 @@ object BitProxyApplier {
+         val file = File(profile.typed.path)
+         val old = file.takeIf { it.isFile }?.readText()
+         BitProxyPrefs.appliedIpv6 = result.ipv6
++        BitProxyPrefs.healthCheck = result.allWireGuard
+         if (old == json) return Outcome.Applied(result, activate(profile, serviceRunning))
+         if (old != null && old != "{}") previousFile.writeText(old)
+         writeAtomically(file, json)
+@@ -138,9 +145,9 @@ object BitProxyApplier {
+             BoxService.start()
+             return true
+         }
+-        return runCatching { Libbox.newStandaloneCommandClient().serviceReload() }
+-            .onFailure { Log.w(TAG, "reload failed", it) }
+-            .isSuccess
++        val ok = BitProxyServiceHooks.reload()
++        if (ok) TunnelHealth.verifySoon()
++        return ok
+     }
+ 
+     private fun writeAtomically(file: File, text: String) {
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+index 6756c34..c69ae06 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyPrefs.kt
+@@ -48,11 +48,11 @@ object BitProxyPrefs {
+         set(value) = prefs.edit { putString("vpn_domains", value.joinToString("\n")) }
+ 
+     var dashboardServersCollapsed: Boolean
+-        get() = prefs.getBoolean("dashboard_servers_collapsed", false)
++        get() = prefs.getBoolean("dashboard_servers_collapsed", true)
+         set(value) = prefs.edit { putBoolean("dashboard_servers_collapsed", value) }
+ 
+     var dashboardAppsCollapsed: Boolean
+-        get() = prefs.getBoolean("dashboard_apps_collapsed", false)
++        get() = prefs.getBoolean("dashboard_apps_collapsed", true)
+         set(value) = prefs.edit { putBoolean("dashboard_apps_collapsed", value) }
+ 
+     var askNewApps: Boolean
+@@ -74,6 +74,16 @@ object BitProxyPrefs {
+         get() = prefs.getBoolean("want_running", false)
+         set(value) = prefs.edit(commit = true) { putBoolean("want_running", value) }
+ 
++    /** The applied VPN group is WireGuard only, so TunnelHealth's UDP check applies (not every proxy type carries UDP). */
++    var healthCheck: Boolean
++        get() = prefs.getBoolean("health_check", true)
++        set(value) = prefs.edit { putBoolean("health_check", value) }
++
++    /** Survives the process restart it causes (see TunnelHealth.verifySoon). */
++    var lastQuickRestart: Long
++        get() = prefs.getLong("last_quick_restart", 0)
++        set(value) = prefs.edit(commit = true) { putLong("last_quick_restart", value) }
++
+     var updaterEnabledOnce: Boolean
+         get() = prefs.getBoolean("updater_enabled_once", false)
+         set(value) = prefs.edit { putBoolean("updater_enabled_once", value) }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt
+index 20fd21c..15c3ac2 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt
+@@ -101,6 +101,7 @@ object BitProxyServiceHooks {
+         EventLog.log("VPN started")
+         running = true
+         BitProxyPrefs.wantRunning = true
++        armRestartAlarm()
+         Ipv6Watcher.start()
+         AppWatcher.start()
+         TunnelHealth.start()
+@@ -123,6 +124,7 @@ object BitProxyServiceHooks {
+         }
+         running = false
+         BitProxyPrefs.wantRunning = false
++        cancelRestartAlarm()
+         Ipv6Watcher.stop()
+         AppWatcher.stop()
+         TunnelHealth.stop()
+@@ -158,36 +160,43 @@ object BitProxyServiceHooks {
+     fun restartVpn(reason: String) = scope.launch {
+         if (!running) return@launch
+         EventLog.log("restarting VPN: $reason")
+-        val done = kotlinx.coroutines.CompletableDeferred<Unit>()
++        if (reload()) EventLog.log("VPN restarted")
++    }
++
++    /**
++     * sing-box reload (also used by Apply) with a watchdog: if it hangs for 20 s, end the process and
++     * start the VPN again from an alarm. Returns false if the reload failed.
++     */
++    suspend fun reload(): Boolean {
++        val done = kotlinx.coroutines.CompletableDeferred<Boolean>()
+         Thread {
+-            runCatching { io.nekohasekai.libbox.Libbox.newStandaloneCommandClient().serviceReload() }
+-                .onFailure { EventLog.log("restart failed: ${it.message}") }
+-            done.complete(Unit)
++            val ok = runCatching { io.nekohasekai.libbox.Libbox.newStandaloneCommandClient().serviceReload() }
++                .onFailure { EventLog.log("reload failed: ${it.message}") }
++                .isSuccess
++            done.complete(ok)
+         }.start()
+-        if (kotlinx.coroutines.withTimeoutOrNull(20_000) { done.await() } == null) {
+-            EventLog.log("restart did not finish in 20 s (sing-box hung); ending the process, VPN restarts in a few seconds")
+-            scheduleServiceStart()
+-            android.os.Process.killProcess(android.os.Process.myPid())
+-        } else {
+-            EventLog.log("VPN restarted")
++        return kotlinx.coroutines.withTimeoutOrNull(20_000) { done.await() } ?: run {
++            restartProcess("reload did not finish in 20 s (sing-box hung)")
++            false
+         }
+     }
+ 
++    /** Clean restart: the VPN starts again from an alarm in a few seconds, in a fresh process. */
++    fun restartProcess(reason: String) {
++        EventLog.log("$reason; ending the process, VPN restarts in a few seconds")
++        scheduleServiceStart()
++        android.os.Process.killProcess(android.os.Process.myPid())
++    }
++
+     /**
+      * Always-on does NOT restart the VPN after our process dies (tested: still down after 2 min),
+      * so ask the system to start the service again shortly. Works from the background because
+      * BitProxy is exempt from battery optimization (the setup asks for that).
+      */
+-    private fun scheduleServiceStart() = runCatching {
+-        val ctx = Application.application
+-        val intent = Intent(ctx, io.nekohasekai.sfa.bg.VPNService::class.java)
+-        val pi = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+-            PendingIntent.getForegroundService(ctx, FAILED_ID + 1, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+-        } else {
+-            PendingIntent.getService(ctx, FAILED_ID + 1, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+-        }
+-        val alarms = ctx.getSystemService(android.app.AlarmManager::class.java)
+-        val at = android.os.SystemClock.elapsedRealtime() + 3_000
++    fun scheduleServiceStart(delayMs: Long = 3_000) = runCatching {
++        val alarms = Application.application.getSystemService(android.app.AlarmManager::class.java)
++        val pi = startIntent()
++        val at = android.os.SystemClock.elapsedRealtime() + delayMs
+         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+             alarms.setAndAllowWhileIdle(android.app.AlarmManager.ELAPSED_REALTIME_WAKEUP, at, pi)
+         } else {
+@@ -195,6 +204,28 @@ object BitProxyServiceHooks {
+         }
+     }.onFailure { EventLog.log("could not schedule restart: ${it.message}") }
+ 
++    private fun startIntent(): PendingIntent {
++        val ctx = Application.application
++        val intent = Intent(ctx, io.nekohasekai.sfa.bg.VPNService::class.java)
++        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
++            PendingIntent.getForegroundService(ctx, FAILED_ID + 1, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
++        } else {
++            PendingIntent.getService(ctx, FAILED_ID + 1, intent, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
++        }
++    }
++
++    /**
++     * Dead man's switch: Android doesn't restart a VPN service whose process was killed (tested,
++     * even with START_STICKY). While the VPN runs, a start alarm stays 30 min in the future and is
++     * pushed back by every health check; if the process dies, the alarm brings the VPN back.
++     * A start while running does nothing.
++     */
++    fun armRestartAlarm() = scheduleServiceStart(30 * 60_000L)
++
++    private fun cancelRestartAlarm() = runCatching {
++        Application.application.getSystemService(android.app.AlarmManager::class.java).cancel(startIntent())
++    }
++
+     /** A stop you asked for hung and the process had to end: say so, don't restart it. */
+     private fun notifyHung() = runCatching {
+         val nm = Application.notification
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyStore.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyStore.kt
+index a46e845..5c4a56b 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyStore.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyStore.kt
+@@ -6,72 +6,134 @@ import android.net.Uri
+ import android.provider.OpenableColumns
+ import io.nekohasekai.sfa.Application
+ import io.nekohasekai.sfa.bitproxy.config.ConfigGenerator
++import io.nekohasekai.sfa.bitproxy.config.ProxyServer
++import io.nekohasekai.sfa.bitproxy.providers.Http
++import io.nekohasekai.sfa.bitproxy.servers.OpenVpnProfile
++import io.nekohasekai.sfa.bitproxy.servers.ServerImport
+ import io.nekohasekai.sfa.bitproxy.wireguard.ParseResult
+ import io.nekohasekai.sfa.bitproxy.wireguard.WireGuardConf
+ import io.nekohasekai.sfa.bitproxy.wireguard.WireGuardConfParser
++import kotlinx.serialization.json.Json
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.jsonPrimitive
+ import java.io.File
+ 
+-/** An imported server: the stored file plus its parse result. */
+-data class StoredServer(val file: File, val tag: String, val conf: WireGuardConf)
++/** An imported server: the stored file plus either a WireGuard config or another sing-box server type. */
++data class StoredServer(val file: File, val tag: String, val conf: WireGuardConf?, val proxy: ProxyServer?) {
++    val isWireGuard get() = conf != null
++
++    /** "VLESS · host:port", "WireGuard · host:port" and so on, for lists. */
++    val summary: String
++        get() {
++            conf?.let { c -> return "${c.peers.first().host}:${c.peers.first().port} · tunnel ${c.ipv4Address.address}" }
++            val o = proxy!!.options
++            val first = (o["servers"] as? kotlinx.serialization.json.JsonArray)?.firstOrNull() as? JsonObject ?: o
++            val host = first["server"]?.jsonPrimitive?.content
++            val port = first["server_port"]?.jsonPrimitive?.content
++            return listOfNotNull(TYPE_NAMES[proxy.type] ?: proxy.type, host?.let { if (port != null) "$it:$port" else it }).joinToString(" · ")
++        }
++
++    val needsLogin get() = proxy?.let { OpenVpnProfile.needsLogin(it.options) } == true
++
++    companion object {
++        private val TYPE_NAMES = mapOf(
++            "vless" to "VLESS", "vmess" to "VMess", "trojan" to "Trojan", "shadowsocks" to "Shadowsocks",
++            "hysteria2" to "Hysteria2", "hysteria" to "Hysteria", "tuic" to "TUIC", "anytls" to "AnyTLS",
++            "socks" to "SOCKS", "http" to "HTTP", "naive" to "Naive", "ssh" to "SSH", "tor" to "Tor",
++            "openvpn-client" to "OpenVPN", "openconnect" to "OpenConnect", "tailscale" to "Tailscale",
++            "shadowtls" to "ShadowTLS", "snell" to "Snell",
++        )
++    }
++}
+ 
+ /**
+- * Imported WireGuard configs live in private app storage (filesDir/bitproxy/servers),
+- * never on shared storage. All functions do file I/O: call them off the main thread.
++ * Imported servers live in private app storage (filesDir/bitproxy/servers), never on shared
++ * storage: WireGuard as .conf, every other type as one sing-box outbound/endpoint in a .json.
++ * All functions do file I/O: call them off the main thread.
+  */
+ object BitProxyStore {
+-    private const val MAX_CONF_BYTES = 64 * 1024
++    private const val MAX_FILE_BYTES = 512 * 1024
++    private val PRETTY = Json { prettyPrint = true }
+ 
+     private val context: Context get() = Application.application
+     val dir: File get() = File(context.filesDir, "bitproxy").apply { mkdirs() }
+     private val serversDir: File get() = File(dir, "servers").apply { mkdirs() }
+ 
+-    /** Servers sorted by file name (like conf-merger.py), with their endpoint tags. */
++    /** WireGuard servers first, then the others, each sorted by file name; tags as in the generated config. */
+     fun servers(): List<StoredServer> {
+-        val parsed = serversDir.listFiles().orEmpty().filter { it.isFile }.sortedBy { it.name }.mapNotNull { f ->
++        val files = serversDir.listFiles().orEmpty().filter { it.isFile }.sortedBy { it.name }
++        val wg = files.filter { !it.name.endsWith(".json") }.mapNotNull { f ->
+             (WireGuardConfParser.parse(f.readText(), f.name) as? ParseResult.Ok)?.let { f to it.conf }
+         }
+-        val tags = ConfigGenerator.endpointTags(parsed.map { it.second })
+-        return parsed.mapIndexed { i, (f, conf) -> StoredServer(f, tags[i], conf) }
++        val proxies = files.filter { it.name.endsWith(".json") }.mapNotNull { f ->
++            runCatching { f to ProxyServer(f.name.removeSuffix(".json"), Http.json(f.readText()) as JsonObject) }.getOrNull()
++        }
++        val tags = ConfigGenerator.tags(wg.map { it.second.name } + proxies.map { it.second.name })
++        return wg.mapIndexed { i, (f, c) -> StoredServer(f, tags[i], c, null) } +
++            proxies.mapIndexed { i, (f, p) -> StoredServer(f, tags[wg.size + i], null, p) }
+     }
+ 
+-    /**
+-     * Imports one .conf from a document URI. A file with the same name is replaced,
+-     * so re-importing an updated export just works. Returns a message for the user.
+-     */
+-    fun import(uri: Uri): ImportResult {
++    /** Imports a file from a document URI: WireGuard, OpenVPN, sing-box JSON or share links. */
++    fun import(uri: Uri): List<ImportResult> {
+         val name = displayName(uri) ?: uri.lastPathSegment?.substringAfterLast('/') ?: "server.conf"
+         val bytes = try {
+-            context.contentResolver.openInputStream(uri)?.use { it.readNBytesCompat(MAX_CONF_BYTES + 1) }
++            context.contentResolver.openInputStream(uri)?.use { it.readNBytesCompat(MAX_FILE_BYTES + 1) }
++        } catch (e: Exception) {
++            return listOf(ImportResult(false, "$name: could not be opened (${e.javaClass.simpleName})"))
++        } ?: return listOf(ImportResult(false, "$name: could not be opened"))
++        if (bytes.size > MAX_FILE_BYTES) return listOf(ImportResult(false, "$name: too large"))
++        return importText(bytes.toString(Charsets.UTF_8), name)
++    }
++
++    /** Pasted or shared text, a file's content, or a subscription URL (network I/O). */
++    fun importText(text: String, name: String): List<ImportResult> {
++        val parsed = try {
++            if (ServerImport.isSubscriptionUrl(text)) ServerImport.fetchSubscription(text) else ServerImport.parse(text, name)
+         } catch (e: Exception) {
+-            return ImportResult(false, "$name: could not be opened (${e.javaClass.simpleName})")
+-        } ?: return ImportResult(false, "$name: could not be opened")
+-        return save(name, bytes)
++            return listOf(ImportResult(false, "$name: ${e.message ?: e.javaClass.simpleName}"))
++        }
++        return parsed.wireGuard.map { (file, content) -> save(file, content.toByteArray()) } +
++            parsed.proxies.map(::saveProxy) +
++            parsed.messages.map { ImportResult(false, it) }
+     }
+ 
+-    /** Validates and stores a config; [name] is a file name ("Server.conf"). Same name = replaced. */
++    /** Validates and stores a WireGuard config; [name] is a file name ("Server.conf"). Same name = replaced. */
+     fun save(name: String, bytes: ByteArray): ImportResult {
+-        if (bytes.size > MAX_CONF_BYTES) return ImportResult(false, "$name: too large for a WireGuard config")
++        if (bytes.size > MAX_FILE_BYTES) return ImportResult(false, "$name: too large for a WireGuard config")
+ 
+         return when (val r = WireGuardConfParser.parse(bytes.toString(Charsets.UTF_8), name)) {
+             is ParseResult.Error -> ImportResult(false, r.message)
+             is ParseResult.Ok -> {
+-                val target = File(serversDir, safeFileName(r.conf.name) + ".conf")
+-                val tmp = File(serversDir, target.name + ".tmp")
+-                tmp.writeBytes(bytes)
+-                if (!tmp.renameTo(target)) {
+-                    tmp.delete()
+-                    return ImportResult(false, "$name: could not be saved")
+-                }
++                val target = write(safeFileName(r.conf.name) + ".conf", bytes) ?: return ImportResult(false, "$name: could not be saved")
+                 ImportResult(true, (listOf("Imported ${r.conf.name}") + r.warnings).joinToString("\n"), target)
+             }
+         }
+     }
+ 
++    /** Stores any other server type as sing-box JSON. Same name = replaced. */
++    fun saveProxy(server: ProxyServer): ImportResult {
++        val bytes = PRETTY.encodeToString(JsonObject.serializer(), server.options).toByteArray()
++        val target = write(safeFileName(server.name) + ".json", bytes) ?: return ImportResult(false, "${server.name}: could not be saved")
++        val login = if (OpenVpnProfile.needsLogin(server.options)) " (tap it to add the username and password)" else ""
++        return ImportResult(true, "Imported ${server.name}$login", target)
++    }
++
+     fun delete(server: StoredServer) {
+         server.file.delete()
+         if (BitProxyPrefs.selectedServer == server.tag) BitProxyPrefs.selectedServer = null
+     }
+ 
++    private fun write(fileName: String, bytes: ByteArray): File? {
++        val target = File(serversDir, fileName)
++        val tmp = File(serversDir, "$fileName.tmp")
++        tmp.writeBytes(bytes)
++        if (!tmp.renameTo(target)) {
++            tmp.delete()
++            return null
++        }
++        return target
++    }
++
+     private fun displayName(uri: Uri): String? = try {
+         context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+             if (c.moveToFirst()) c.getString(0) else null
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/Redactor.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/Redactor.kt
+index 6e1462a..c3b05e5 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/Redactor.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/Redactor.kt
+@@ -1,15 +1,18 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ package io.nekohasekai.sfa.bitproxy
+ 
+-/** Removes WireGuard private and preshared keys from anything that leaves the app. */
++/** Removes keys, passwords and user names of every server type from anything that leaves the app. */
+ object Redactor {
+     private const val MASK = "[REDACTED]"
+-    private val JSON_KEY = Regex(""""(private_key|pre_shared_key)"\s*:\s*"[^"]*"""")
++    // Keys of every server type BitProxy writes: WireGuard, proxy passwords/UUIDs, OpenVPN keys.
++    private val JSON_KEY = Regex(""""(private_key|pre_shared_key|password|uuid|auth_str|auth|token|auth_key|username)"\s*:\s*"[^"]*"""")
++    private val JSON_KEY_LINES = Regex(""""(client_key|key|static_key)"\s*:\s*\[[^\]]*]""")
+     private val CONF_KEY = Regex("""(?im)^(\s*(?:PrivateKey|PresharedKey)\s*=\s*).*$""")
+ 
+     /** [secrets]: known key values (from the imported configs), masked wherever they appear. */
+     fun redact(text: String, secrets: Collection<String> = emptyList()): String {
+         var out = JSON_KEY.replace(text) { """"${it.groupValues[1]}": "$MASK"""" }
++        out = JSON_KEY_LINES.replace(out) { """"${it.groupValues[1]}": ["$MASK"]""" }
+         out = CONF_KEY.replace(out) { it.groupValues[1] + MASK }
+         for (s in secrets) if (s.length >= 16) out = out.replace(s, MASK)
+         return out
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ShareImportActivity.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ShareImportActivity.kt
+index c703f95..b465dad 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ShareImportActivity.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ShareImportActivity.kt
+@@ -14,7 +14,8 @@ import kotlinx.coroutines.launch
+ import kotlinx.coroutines.withContext
+ 
+ /**
+- * "Share → BitProxy" and "Open with → BitProxy" for WireGuard .conf files (or pasted conf text).
++ * "Share → BitProxy" and "Open with → BitProxy" for server files (WireGuard, OpenVPN, sing-box
++ * JSON) and shared text (a conf, share links or a subscription URL).
+  * Imports them and, once BitProxy has applied a config before, applies again so the new servers
+  * show up right away. The selected server stays the same.
+  */
+@@ -26,7 +27,7 @@ class ShareImportActivity : ComponentActivity() {
+             Intent.ACTION_SEND_MULTIPLE -> IntentCompat.getParcelableArrayListExtra(intent, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+             else -> listOfNotNull(intent.data)
+         }
+-        val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.takeIf { uris.isEmpty() && "[Interface]" in it }
++        val text = intent.getStringExtra(Intent.EXTRA_TEXT)?.takeIf { uris.isEmpty() && it.isNotBlank() }
+         lifecycleScope.launch {
+             val message = withContext(Dispatchers.IO) { import(uris, text) }
+             EventLog.log("share import: $message")
+@@ -36,11 +37,11 @@ class ShareImportActivity : ComponentActivity() {
+     }
+ 
+     private suspend fun import(uris: List<Uri>, text: String?): String {
+-        val results = uris.map(BitProxyStore::import) +
+-            listOfNotNull(text?.let { BitProxyStore.save("${sharedName(it)}.conf", it.toByteArray()) })
++        val results = uris.flatMap(BitProxyStore::import) +
++            text?.let { BitProxyStore.importText(it, "${sharedName(it)}.conf") }.orEmpty()
+         val imported = results.count { it.ok }
+         return when {
+-            results.isEmpty() -> "Nothing to import: share a WireGuard .conf file"
++            results.isEmpty() -> "Nothing to import: share a WireGuard or OpenVPN file, share links or sing-box JSON"
+             imported == 0 -> results.joinToString("\n") { it.message }
+             ProfileManager.get(BitProxyPrefs.profileId) == null -> "Imported $imported. Open BitProxy and tap Apply."
+             else -> when (val o = BitProxyApplier.apply(BitProxyServiceHooks.running)) {
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/TunnelHealth.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/TunnelHealth.kt
+index 6812e03..6cb004c 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/TunnelHealth.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/TunnelHealth.kt
+@@ -23,11 +23,13 @@ import kotlinx.coroutines.withTimeoutOrNull
+  * "Connected" isn't proof that traffic flows (overnight: VPN on, no internet). While a network is
+  * up, send a small UDP request (STUN) through the VPN outbound every few minutes; after two
+  * failures in a row, rebuild sing-box. Recoveries back off (3 → 30 min) so a dead server can't
+- * cause a reload loop. Same idea as Proton VPN's in-tunnel "local agent" check.
++ * cause a reload loop. Same idea as Proton VPN's in-tunnel "local agent" check. Only for
++ * WireGuard groups: some proxy types don't carry UDP, and they open fresh connections anyway.
+  */
+ object TunnelHealth {
+     private const val BASE_MS = 3 * 60_000L
+     private const val MAX_MS = 30 * 60_000L
++    private const val SCREEN_OFF_MS = 15 * 60_000L
+     private const val RETRY_MS = 30_000L
+     private const val PROBE_TIMEOUT_MS = 10_000L
+     private val STUN_SERVERS = listOf("stun.cloudflare.com:3478", "stun.l.google.com:19302")
+@@ -38,15 +40,37 @@ object TunnelHealth {
+     /** Wait before the next check after [restarts] recoveries that didn't help: 3, 6, 12, 24, 30 min. */
+     fun delayAfter(restarts: Int): Long = (BASE_MS shl restarts.coerceIn(0, 4)).coerceAtMost(MAX_MS)
+ 
++    /** Screen turned on: check now, so a tunnel that died during sleep is fixed when you pick the phone up. */
++    private val screenOn = object : android.content.BroadcastReceiver() {
++        override fun onReceive(context: android.content.Context, intent: android.content.Intent) = verifySoon()
++    }
++    private var receiverOn = false
++
++    /** Battery: every 3 min while the screen is on, every 15 min while it's off, never in Doze. */
++    private fun interval(restarts: Int): Long {
++        val interactive = Application.application.getSystemService(PowerManager::class.java).isInteractive
++        return if (interactive) delayAfter(restarts) else maxOf(SCREEN_OFF_MS, delayAfter(restarts))
++    }
++
+     fun start() {
+         job?.cancel()
++        if (!receiverOn) {
++            androidx.core.content.ContextCompat.registerReceiver(
++                Application.application,
++                screenOn,
++                android.content.IntentFilter(android.content.Intent.ACTION_SCREEN_ON),
++                androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
++            )
++            receiverOn = true
++        }
+         job = scope.launch {
+             var failures = 0
+             var restarts = 0
+             while (isActive) {
+-                delay(if (failures > 0) RETRY_MS else delayAfter(restarts))
++                delay(if (failures > 0) RETRY_MS else interval(restarts))
++                BitProxyServiceHooks.armRestartAlarm()
+                 // No network: nothing to test (Ipv6Watcher handles the outage). Doze: sing-box is paused.
+-                if (!Ipv6Watcher.networkUp || deviceIdle()) {
++                if (!BitProxyPrefs.healthCheck || !Ipv6Watcher.networkUp || deviceIdle()) {
+                     failures = 0
+                     continue
+                 }
+@@ -70,6 +94,30 @@ object TunnelHealth {
+     fun stop() {
+         job?.cancel()
+         job = null
++        verify?.cancel()
++        if (receiverOn) runCatching { Application.application.unregisterReceiver(screenOn) }
++        receiverOn = false
++    }
++
++    private var verify: Job? = null
++
++    /**
++     * Right after a reload (Apply, app installed/removed, IPv6 change) and when the screen turns on:
++     * if nothing gets through the tunnel 5 and 20 s later, restart cleanly in a fresh process.
++     */
++    fun verifySoon() {
++        if (!BitProxyPrefs.healthCheck) return
++        verify?.cancel()
++        verify = scope.launch {
++            for (wait in listOf(5_000L, 15_000L)) {
++                delay(wait)
++                if (!BitProxyServiceHooks.running || !Ipv6Watcher.networkUp || probe()) return@launch
++            }
++            // A server that is simply down would otherwise restart on every unlock: at most every 10 min.
++            if (System.currentTimeMillis() - BitProxyPrefs.lastQuickRestart < 10 * 60_000L) return@launch
++            BitProxyPrefs.lastQuickRestart = System.currentTimeMillis()
++            BitProxyServiceHooks.restartProcess("no traffic through the tunnel")
++        }
+     }
+ 
+     private fun deviceIdle() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
+index 1840158..8a8a572 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/config/ConfigGenerator.kt
+@@ -1,7 +1,6 @@
+ // SPDX-License-Identifier: GPL-3.0-or-later
+ package io.nekohasekai.sfa.bitproxy.config
+ 
+-import io.nekohasekai.sfa.bitproxy.net.IpAddress
+ import io.nekohasekai.sfa.bitproxy.wireguard.WireGuardConf
+ import kotlinx.serialization.json.Json
+ import kotlinx.serialization.json.JsonArray
+@@ -13,6 +12,7 @@ import kotlinx.serialization.json.buildJsonArray
+ import kotlinx.serialization.json.buildJsonObject
+ import kotlinx.serialization.json.put
+ import kotlinx.serialization.json.putJsonArray
++import kotlinx.serialization.json.jsonPrimitive
+ import kotlinx.serialization.json.putJsonObject
+ 
+ /** How an app's traffic goes out. BLOCK rejects its traffic and DNS (no internet at all). */
+@@ -44,12 +44,31 @@ data class GeneratorInput(
+     val vpnDomains: List<String> = emptyList(),
+     /** Wi-Fi networks (SSIDs) where every app goes Direct, except blocked apps. */
+     val trustedWifi: List<String> = emptyList(),
++    /** Other server types (VLESS, Shadowsocks, OpenVPN, ...), shown after the WireGuard servers. */
++    val proxies: List<ProxyServer> = emptyList(),
+ )
+ 
++/** Any other sing-box outbound or endpoint (options without "tag"), imported from a link, JSON or .ovpn file. */
++data class ProxyServer(val name: String, val options: JsonObject) {
++    val type: String get() = options["type"]?.jsonPrimitive?.content.orEmpty()
++
++    /** These are sing-box endpoints (own tunnel address), the rest are outbounds. */
++    val isEndpoint: Boolean get() = type in ENDPOINT_TYPES
++
++    companion object {
++        val ENDPOINT_TYPES = setOf("wireguard", "tailscale", "openvpn-client", "openconnect")
++
++        /** Types that aren't servers and never become one. */
++        val NOT_SERVERS = setOf("direct", "block", "dns", "selector", "urltest", "bridge", "")
++    }
++}
++
+ sealed interface GenerateResult {
+     data class Ok(
+         val config: JsonObject,
+         val selectedTag: String,
++        /** Only WireGuard servers in the VPN group: the in-tunnel health check applies. */
++        val allWireGuard: Boolean,
+         val tunAddresses: List<String>,
+         val dnsServer: String,
+         val ipv6: Boolean,
+@@ -75,11 +94,18 @@ object ConfigGenerator {
+     const val DIRECT = "Direct"
+     private const val TUN_MTU = 1400 // default 9000 made forwarded pages load slowly
+ 
++    // Proxy-type servers re-open each connection, so any TUN address works: sing-box's usual one.
++    private const val PROXY_TUN_V4 = "172.19.0.1/30"
++    private const val PROXY_TUN_V6 = "fdfe:dcba:9876::1/126"
++    private const val PROXY_DNS = "1.1.1.1"
++
++    fun endpointTags(servers: List<WireGuardConf>): List<String> = tags(servers.map { it.name })
++
+     /** Same as the script: lowercase, spaces to dashes, "-2", "-3"... for duplicates. */
+-    fun endpointTags(servers: List<WireGuardConf>): List<String> {
++    fun tags(names: List<String>): List<String> {
+         val used = mutableSetOf<String>()
+-        return servers.map { conf ->
+-            val tag = conf.name.lowercase().replace(" ", "-")
++        return names.map { name ->
++            val tag = name.lowercase().replace(" ", "-")
+             var unique = tag
+             var n = 2
+             while (unique in used) unique = "$tag-${n++}"
+@@ -89,35 +115,52 @@ object ConfigGenerator {
+     }
+ 
+     fun generate(input: GeneratorInput): GenerateResult {
+-        if (input.servers.isEmpty()) return GenerateResult.Error("No WireGuard servers imported")
+-        val tags = endpointTags(input.servers)
++        val wgCount = input.servers.size
++        if (wgCount + input.proxies.size == 0) return GenerateResult.Error("No servers imported")
++        val tags = tags(input.servers.map { it.name } + input.proxies.map { it.name })
++        val proxyIndices = input.proxies.indices.map { wgCount + it }
+         val selectedIndex = tags.indexOf(input.selectedTag).takeIf { it >= 0 } ?: 0
+-        val selected = input.servers[selectedIndex]
+         val warnings = mutableListOf<String>()
++        val tunAddresses = mutableListOf<String>()
++        val group: List<Int>
++        val useIpv6: Boolean
++        val dnsServer: String
++
++        if (selectedIndex < wgCount) {
++            val selected = input.servers[selectedIndex]
++            // sing-box forwards TUN packets into WireGuard without rewriting the source IP,
++            // so the TUN address MUST equal the selected server's tunnel address. Servers with
++            // a different address would silently drop traffic, so they stay out of this config.
++            // Proxy-type servers don't care about the address and can always join.
++            val tunIp = selected.ipv4Address.address
++            group = input.servers.indices.filter { input.servers[it].ipv4Address.address == tunIp } + proxyIndices
+ 
+-        // sing-box forwards TUN packets into WireGuard without rewriting the source IP,
+-        // so the TUN address MUST equal the selected server's tunnel address. Servers with
+-        // a different address would silently drop traffic, so they stay out of this config.
+-        val tunIp = selected.ipv4Address.address
+-        val group = input.servers.indices.filter { input.servers[it].ipv4Address.address == tunIp }
+-        val others = input.servers.indices.filter { it !in group }.map { tags[it] }
++            // /24, not /30: sing-box gives the phone the next IP as DNS server, which must be
++            // neither the network nor the broadcast address.
++            val host = tunIp.bytes[3].toInt() and 0xff
++            if (host == 0 || host >= 254) {
++                return GenerateResult.Error("Tunnel address $tunIp can't be used: its DNS address would be the network or broadcast address of the /24")
++            }
++            tunAddresses += "$tunIp/24"
++            val v6 = selected.ipv6Address
++            useIpv6 = input.ipv6 && v6 != null
++            if (input.ipv6 && v6 == null) warnings += "Network has IPv6 but ${tags[selectedIndex]} has no IPv6 address; staying IPv4-only"
++            if (useIpv6) tunAddresses += "${v6!!.address}/126"
++            dnsServer = selected.ipv4Dns!!.text // the parser rejects configs without DNS
++        } else {
++            group = proxyIndices
++            tunAddresses += PROXY_TUN_V4
++            useIpv6 = input.ipv6
++            if (useIpv6) tunAddresses += PROXY_TUN_V6
++            dnsServer = PROXY_DNS
++        }
++        val others = (0 until wgCount).filter { it !in group }.map { tags[it] }
+         if (others.isNotEmpty()) {
+             warnings += "Servers with a different tunnel address are not in the VPN group (select one to switch): ${others.joinToString()}"
+         }
+-
+-        // /24, not /30: sing-box gives the phone the next IP as DNS server, which must be
+-        // neither the network nor the broadcast address.
+-        val host = tunIp.bytes[3].toInt() and 0xff
+-        if (host == 0 || host >= 254) {
+-            return GenerateResult.Error("Tunnel address $tunIp can't be used: its DNS address would be the network or broadcast address of the /24")
+-        }
+-        val tunAddresses = mutableListOf("$tunIp/24")
+-        val v6 = selected.ipv6Address
+-        val useIpv6 = input.ipv6 && v6 != null
+-        if (input.ipv6 && v6 == null) warnings += "Network has IPv6 but ${tags[selectedIndex]} has no IPv6 address; staying IPv4-only"
+-        if (useIpv6) tunAddresses += "${v6!!.address}/126"
+-
+-        val dnsServer: IpAddress = selected.ipv4Dns!! // the parser rejects configs without DNS
++        // A WireGuard server's own DNS is only reachable through that tunnel; with other server
++        // types in the group, VPN apps resolve over TCP (works through every proxy type).
++        val allWireGuard = group.all { it < wgCount }
+ 
+         // Apps route straight to VPN / Direct. The script also made one selector per app, but
+         // switching is done in BitProxy (which re-applies, so DNS rules follow) and the
+@@ -138,9 +181,9 @@ object ConfigGenerator {
+                         put("tag", "local")
+                     }
+                     addJsonObject {
+-                        put("type", "udp")
++                        put("type", if (allWireGuard) "udp" else "tcp")
+                         put("tag", "remote")
+-                        put("server", dnsServer.text)
++                        put("server", if (allWireGuard) dnsServer else PROXY_DNS)
+                         put("detour", VPN)
+                     }
+                 }
+@@ -183,7 +226,12 @@ object ConfigGenerator {
+                     put("strict_route", true)
+                 }
+             }
+-            putJsonArray("endpoints") { group.forEach { add(endpoint(input.servers[it], tags[it])) } }
++            putJsonArray("endpoints") {
++                for (i in group) {
++                    if (i < wgCount) add(endpoint(input.servers[i], tags[i]))
++                    else input.proxies[i - wgCount].takeIf { it.isEndpoint }?.let { add(tagged(it, tags[i])) }
++                }
++            }
+             putJsonArray("outbounds") {
+                 addJsonObject {
+                     // Only servers sharing the TUN address are in the group, so auto-switching is safe.
+@@ -194,6 +242,7 @@ object ConfigGenerator {
+                     if (input.autoPick) put("interval", "${input.autoPickMinutes.coerceIn(1, 60)}m")
+                     put("interrupt_exist_connections", true)
+                 }
++                for (i in group.filter { it >= wgCount }) input.proxies[i - wgCount].takeIf { !it.isEndpoint }?.let { add(tagged(it, tags[i])) }
+                 // A direct outbound must not have "detour" ("detour is not supported in direct context").
+                 addJsonObject {
+                     put("type", "direct")
+@@ -247,8 +296,9 @@ object ConfigGenerator {
+         return GenerateResult.Ok(
+             config = config,
+             selectedTag = tags[selectedIndex],
++            allWireGuard = allWireGuard,
+             tunAddresses = tunAddresses,
+-            dnsServer = dnsServer.text,
++            dnsServer = if (allWireGuard) dnsServer else "$PROXY_DNS (TCP)",
+             ipv6 = useIpv6,
+             otherAddressServers = others,
+             appRuleCount = routes.size,
+@@ -276,5 +326,7 @@ object ConfigGenerator {
+         conf.mtu?.let { put("mtu", it) }
+     }
+ 
++    private fun tagged(p: ProxyServer, tag: String) = JsonObject(mapOf("type" to p.options.getValue("type"), "tag" to JsonPrimitive(tag)) + (p.options - "type" - "tag"))
++
+     private fun intArray(values: List<Int>) = JsonArray(values.map(::JsonPrimitive))
+ }
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/servers/OpenVpnProfile.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/servers/OpenVpnProfile.kt
+new file mode 100644
+index 0000000..3ea1df9
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/servers/OpenVpnProfile.kt
+@@ -0,0 +1,141 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.servers
++
++import io.nekohasekai.sfa.bitproxy.config.ProxyServer
++import kotlinx.serialization.json.JsonArray
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.JsonPrimitive
++import kotlinx.serialization.json.add
++import kotlinx.serialization.json.addJsonObject
++import kotlinx.serialization.json.buildJsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import kotlinx.serialization.json.put
++import kotlinx.serialization.json.putJsonArray
++import kotlinx.serialization.json.putJsonObject
++
++/**
++ * OpenVPN client profiles (.ovpn) to sing-box's "openvpn-client" endpoint. Covers what VPN
++ * providers export: remotes, inline <ca>/<cert>/<key>/<tls-auth>/<tls-crypt>, ciphers,
++ * auth-user-pass (the username/password are added later in the app). Pure Kotlin, unit tested.
++ */
++object OpenVpnProfile {
++    data class Result(val server: ProxyServer, val warnings: List<String>)
++
++    fun looksLikeOvpn(text: String) = Regex("""(?m)^\s*remote\s+\S+""").containsMatchIn(text) &&
++        Regex("""(?m)^\s*(client|dev\s+tun|<ca>|proto\s)""").containsMatchIn(text)
++
++    /** A profile that needs a login and doesn't have one yet (not put into the config until it does). */
++    fun needsLogin(options: JsonObject) = options["type"]?.jsonPrimitive?.content == "openvpn-client" &&
++        options["username"]?.jsonPrimitive?.content?.isEmpty() == true
++
++    fun withLogin(options: JsonObject, username: String, password: String) =
++        JsonObject(options + mapOf("username" to JsonPrimitive(username), "password" to JsonPrimitive(password)))
++
++    fun parse(text: String, name: String): Result {
++        val warnings = mutableListOf<String>()
++        val blocks = mutableMapOf<String, String>()
++        val directives = mutableListOf<List<String>>()
++        var block: String? = null
++        val blockText = StringBuilder()
++        for (raw in text.removePrefix("﻿").lines()) {
++            val line = raw.trim()
++            if (block != null) {
++                if (line == "</$block>") {
++                    blocks[block] = blockText.toString().trim()
++                    block = null
++                    blockText.clear()
++                } else {
++                    blockText.appendLine(line)
++                }
++                continue
++            }
++            if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) continue
++            val start = Regex("""^<([\w-]+)>$""").matchEntire(line)
++            if (start != null) {
++                block = start.groupValues[1]
++            } else {
++                directives += line.split(Regex("""\s+""")).map { it.removeSurrounding("\"") }
++            }
++        }
++        fun first(name: String) = directives.firstOrNull { it[0] == name }
++        fun arg(name: String, i: Int = 1) = first(name)?.getOrNull(i)
++
++        if (arg("dev")?.startsWith("tap") == true) throw IllegalArgumentException("$name: \"dev tap\" (layer 2) is not supported, only tun")
++        val defaultProto = network(arg("proto") ?: "udp")
++        val defaultPort = arg("port")?.toIntOrNull() ?: 1194
++        val remotes = directives.filter { it[0] == "remote" && it.size >= 2 }.map { r ->
++            Triple(r[1], r.getOrNull(2)?.toIntOrNull() ?: defaultPort, r.getOrNull(3)?.let(::network) ?: defaultProto)
++        }
++        if (remotes.isEmpty()) throw IllegalArgumentException("$name: no \"remote\" server")
++        val ca = blocks["ca"] ?: throw IllegalArgumentException("$name: no inline <ca> certificate (a separate ca file can't be read)")
++        for (d in listOf("ca", "cert", "key", "tls-auth", "tls-crypt", "tls-crypt-v2")) {
++            if (first(d)?.getOrNull(1) != null && blocks[d] == null) throw IllegalArgumentException("$name: \"$d\" points to a separate file; use a profile with the file inlined as <$d>")
++        }
++
++        val options = buildJsonObject {
++            put("type", "openvpn-client")
++            if (remotes.size == 1) {
++                put("server", remotes[0].first)
++                put("server_port", remotes[0].second)
++                put("network", remotes[0].third)
++            } else {
++                putJsonArray("servers") {
++                    remotes.forEach { (host, port, net) ->
++                        addJsonObject {
++                            put("server", host)
++                            put("server_port", port)
++                            put("network", net)
++                        }
++                    }
++                }
++                if (first("remote-random") != null) put("remote_random", true)
++            }
++            if (first("auth-user-pass") != null) {
++                put("username", "")
++                put("password", "")
++            }
++            arg("cipher")?.let { put("cipher", it) }
++            arg("data-ciphers")?.let { c -> putJsonArray("data_ciphers") { c.split(':').forEach { add(it) } } }
++            arg("data-ciphers-fallback")?.let { put("data_ciphers_fallback", it) }
++            arg("auth")?.let { put("auth", it) }
++            arg("tun-mtu")?.toIntOrNull()?.let { put("mtu", it) }
++            arg("mssfix")?.toIntOrNull()?.let { put("mss_fix", it) }
++            arg("fragment")?.toIntOrNull()?.let { put("fragment", it) }
++            directives.firstOrNull { it[0] == "keepalive" && it.size >= 3 }?.let {
++                put("ping_interval", "${it[1]}s")
++                put("ping_restart", "${it[2]}s")
++            }
++            arg("ping")?.let { put("ping_interval", "${it}s") }
++            arg("ping-restart")?.let { put("ping_restart", "${it}s") }
++            first("compress")?.let { put("compression", it.getOrNull(1) ?: "stub") }
++            first("comp-lzo")?.let { put("compression_lzo", it.getOrNull(1) ?: "adaptive") }
++            first("allow-compression")?.getOrNull(1)?.let { put("allow_compression", it) }
++            putJsonObject("tls") {
++                put("certificate", lines(ca))
++                blocks["cert"]?.let { put("client_certificate", lines(it)) }
++                blocks["key"]?.let { put("client_key", lines(it)) }
++                first("verify-x509-name")?.let {
++                    put("server_name", it[1])
++                    it.getOrNull(2)?.let { type -> put("server_name_type", type) }
++                }
++                arg("remote-cert-tls")?.let { put("remote_certificate_tls", it) }
++                arg("tls-version-min")?.let { put("version_min", it) }
++                val wrap = listOf("tls-crypt-v2" to "tls_crypt_v2", "tls-crypt" to "tls_crypt", "tls-auth" to "tls_auth").firstOrNull { blocks[it.first] != null }
++                wrap?.let { (block, type) ->
++                    putJsonObject("control_wrap") {
++                        put("type", type)
++                        put("key", lines(blocks.getValue(block)))
++                        if (type == "tls_auth") {
++                            (arg("key-direction") ?: arg("tls-auth", 2))?.let { put("direction", if (it == "0") "server" else "client") }
++                        }
++                    }
++                }
++            }
++        }
++        return Result(ProxyServer(name, options), warnings)
++    }
++
++    private fun network(proto: String) = if (proto.startsWith("tcp")) "tcp" else "udp"
++
++    private fun lines(pem: String) = JsonArray(pem.lines().filter { it.isNotBlank() }.map(::JsonPrimitive))
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/servers/ServerImport.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/servers/ServerImport.kt
+new file mode 100644
+index 0000000..2854ca0
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/servers/ServerImport.kt
+@@ -0,0 +1,79 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.servers
++
++import io.nekohasekai.sfa.bitproxy.config.ProxyServer
++import io.nekohasekai.sfa.bitproxy.providers.Http
++import kotlinx.serialization.json.JsonArray
++import kotlinx.serialization.json.JsonElement
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.jsonPrimitive
++
++/**
++ * Works out what an imported file or pasted text is: WireGuard .conf, OpenVPN .ovpn, sing-box JSON
++ * (one outbound/endpoint, a list, or a whole config), share links or a subscription. Pure except
++ * for [fetchSubscription].
++ */
++object ServerImport {
++    data class Parsed(
++        /** WireGuard configs, kept as text: (file name, content). */
++        val wireGuard: List<Pair<String, String>> = emptyList(),
++        val proxies: List<ProxyServer> = emptyList(),
++        val messages: List<String> = emptyList(),
++    )
++
++    fun parse(text: String, fileName: String): Parsed {
++        val t = text.removePrefix("﻿").trim()
++        return when {
++            Regex("""(?im)^\s*\[Interface]""").containsMatchIn(t) -> Parsed(wireGuard = listOf(fileName to text))
++            t.startsWith("{") || t.startsWith("[") -> json(t, fileName)
++            fileName.endsWith(".ovpn", ignoreCase = true) || OpenVpnProfile.looksLikeOvpn(t) -> {
++                val r = OpenVpnProfile.parse(t, fileName.substringAfterLast('/').replace(Regex("""\.(ovpn|conf|txt)$""", RegexOption.IGNORE_CASE), ""))
++                Parsed(proxies = listOf(r.server), messages = r.warnings)
++            }
++            else -> ShareLinks.parse(t).let { r ->
++                if (r.servers.isEmpty() && r.errors.isEmpty()) Parsed(messages = listOf("$fileName: not a WireGuard, OpenVPN, sing-box JSON or share-link file"))
++                else Parsed(proxies = r.servers, messages = r.errors)
++            }
++        }
++    }
++
++    /** A subscription address (https://…/path), not an HTTP proxy link (which has user:pass@ or no path). */
++    fun isSubscriptionUrl(text: String): Boolean {
++        val t = text.trim()
++        if ('\n' in t || !(t.startsWith("https://") || t.startsWith("http://"))) return false
++        val uri = runCatching { java.net.URI(t) }.getOrNull() ?: return false
++        return uri.rawUserInfo == null && (uri.rawPath.orEmpty().length > 1 || uri.rawQuery != null)
++    }
++
++    /** Downloads a subscription (share links, base64 list or sing-box JSON). Network I/O. */
++    fun fetchSubscription(url: String): Parsed {
++        val body = Http.request(url.trim(), headers = mapOf("User-Agent" to "sing-box BitProxy"), error = { code, _ -> "Subscription download failed (HTTP $code)" })
++        return parse(body, url.substringAfterLast('/').substringBefore('?').ifBlank { "subscription" })
++    }
++
++    /** One outbound/endpoint object, an array of them, or a config with "outbounds"/"endpoints". */
++    private fun json(text: String, fileName: String): Parsed {
++        val root = runCatching { Http.json(text) }.getOrElse { return Parsed(messages = listOf("$fileName: invalid JSON (${it.message})")) }
++        val items: List<JsonElement> = when {
++            root is JsonArray -> root
++            root is JsonObject && ("outbounds" in root || "endpoints" in root) ->
++                (root["endpoints"] as? JsonArray).orEmpty() + (root["outbounds"] as? JsonArray).orEmpty()
++            else -> listOf(root)
++        }
++        val messages = mutableListOf<String>()
++        val proxies = items.mapNotNull { it as? JsonObject }.mapNotNull { o ->
++            val type = o["type"]?.jsonPrimitive?.content.orEmpty()
++            if (type in ProxyServer.NOT_SERVERS) return@mapNotNull null
++            if (type == "wireguard") {
++                messages += "WireGuard in JSON is skipped: import it as a .conf file (the tunnel address must match the TUN)"
++                return@mapNotNull null
++            }
++            val name = o["tag"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() } ?: "$type ${o["server"]?.jsonPrimitive?.content.orEmpty()}".trim()
++            // Tags are renamed on import, so a chain to another outbound can't be kept.
++            if ("detour" in o) messages += "$name: \"detour\" removed (chains to other outbounds aren't supported)"
++            ProxyServer(name, JsonObject(o - "tag" - "detour"))
++        }
++        if (proxies.isEmpty()) messages += "$fileName: no server outbounds in this JSON"
++        return Parsed(proxies = proxies, messages = messages)
++    }
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/servers/ShareLinks.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/servers/ShareLinks.kt
+new file mode 100644
+index 0000000..af4fe0c
+--- /dev/null
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/servers/ShareLinks.kt
+@@ -0,0 +1,279 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.servers
++
++import io.nekohasekai.sfa.bitproxy.config.ProxyServer
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.JsonObjectBuilder
++import kotlinx.serialization.json.add
++import kotlinx.serialization.json.buildJsonObject
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import kotlinx.serialization.json.put
++import kotlinx.serialization.json.putJsonArray
++import kotlinx.serialization.json.putJsonObject
++import java.net.URI
++import java.net.URLDecoder
++import kotlin.io.encoding.Base64
++import kotlin.io.encoding.ExperimentalEncodingApi
++
++/**
++ * Share links (as used by v2rayN, NekoBox, Shadowrocket, sing-box clients) to sing-box outbounds:
++ * vless, vmess, trojan, ss, hysteria2/hy2, hysteria, tuic, anytls, socks, http(s), naive+https, ssh.
++ * A subscription (base64 or plain list of links) works too. Pure Kotlin, unit tested.
++ */
++@OptIn(ExperimentalEncodingApi::class)
++object ShareLinks {
++    data class Result(val servers: List<ProxyServer>, val errors: List<String>)
++
++    private val SCHEMES = setOf(
++        "vless", "vmess", "trojan", "ss", "hysteria2", "hy2", "hysteria", "tuic", "anytls",
++        "socks", "socks5", "socks5h", "http", "https", "naive+https", "naive+http", "ssh",
++    )
++
++    /** True if [text] looks like one or more share links (possibly base64-wrapped). */
++    fun looksLikeLinks(text: String) = links(text).isNotEmpty()
++
++    fun parse(text: String): Result {
++        val servers = mutableListOf<ProxyServer>()
++        val errors = mutableListOf<String>()
++        for (link in links(text)) {
++            try {
++                servers += parseLink(link)
++            } catch (e: Exception) {
++                errors += "${link.substringBefore("://")} link: ${e.message ?: e.javaClass.simpleName}"
++            }
++        }
++        return Result(servers, errors)
++    }
++
++    private fun links(text: String): List<String> {
++        fun find(t: String) = t.lines().map { it.trim() }.filter { l -> l.substringBefore("://", "").lowercase() in SCHEMES }
++        find(text).takeIf { it.isNotEmpty() }?.let { return it }
++        // Subscriptions are often one base64 blob.
++        return decodeBase64(text.filterNot { it.isWhitespace() })?.let(::find).orEmpty()
++    }
++
++    fun parseLink(link: String): ProxyServer {
++        val scheme = link.substringBefore("://").lowercase()
++        if (scheme == "vmess") return vmess(link)
++        if (scheme == "ss") return shadowsocks(link)
++        val uri = URI(link.replace(" ", "%20"))
++        val q = query(uri.rawQuery)
++        val host = uri.host?.removeSurrounding("[", "]") ?: throw IllegalArgumentException("no server address")
++        val user = uri.rawUserInfo?.let(::decode)
++        val name = uri.rawFragment?.let(::decode)?.takeIf { it.isNotBlank() }
++        fun portOr(default: Int) = uri.port.takeIf { it > 0 } ?: default
++        val options = when (scheme) {
++            "vless" -> obj("vless", host, portOr(443)) {
++                put("uuid", user ?: throw IllegalArgumentException("no UUID"))
++                q["flow"]?.takeIf { it.isNotBlank() }?.let { put("flow", it) }
++                q["packetEncoding"]?.let { put("packet_encoding", it) } ?: put("packet_encoding", "xudp")
++                tls(q, default = false)
++                transport(q)
++            }
++            "trojan" -> obj("trojan", host, portOr(443)) {
++                put("password", user ?: throw IllegalArgumentException("no password"))
++                tls(q, default = true)
++                transport(q)
++            }
++            "hysteria2", "hy2" -> obj("hysteria2", host, portOr(443)) {
++                user?.let { put("password", it) }
++                q["mport"]?.takeIf { it.isNotBlank() }?.let { ports -> putJsonArray("server_ports") { ports.split(',').forEach { add(it.replace('-', ':')) } } }
++                q["obfs"]?.takeIf { it.isNotBlank() && it != "none" }?.let { type ->
++                    putJsonObject("obfs") {
++                        put("type", type)
++                        put("password", q["obfs-password"].orEmpty())
++                    }
++                }
++                tls(q, default = true, quic = true)
++            }
++            "hysteria" -> obj("hysteria", host, portOr(443)) {
++                q["auth"]?.let { put("auth_str", it) }
++                q["upmbps"]?.toIntOrNull()?.let { put("up_mbps", it) } ?: put("up_mbps", 50)
++                q["downmbps"]?.toIntOrNull()?.let { put("down_mbps", it) } ?: put("down_mbps", 200)
++                q["obfsParam"]?.takeIf { it.isNotBlank() }?.let { put("obfs", it) }
++                tls(q + listOfNotNull(q["peer"]?.let { "sni" to it }).toMap(), default = true, quic = true)
++            }
++            "tuic" -> obj("tuic", host, portOr(443)) {
++                val (uuid, password) = (user ?: throw IllegalArgumentException("no UUID")).split(':', limit = 2).let { it[0] to it.getOrElse(1) { "" } }
++                put("uuid", uuid)
++                put("password", password)
++                q["congestion_control"]?.let { put("congestion_control", it) }
++                q["udp_relay_mode"]?.let { put("udp_relay_mode", it) }
++                tls(q + ("alpn" to (q["alpn"] ?: "h3")), default = true, quic = true)
++            }
++            "anytls" -> obj("anytls", host, portOr(443)) {
++                put("password", user ?: throw IllegalArgumentException("no password"))
++                tls(q, default = true)
++            }
++            "socks", "socks5", "socks5h" -> obj("socks", host, portOr(1080)) {
++                put("version", "5")
++                credentials(user)
++            }
++            "http", "https" -> obj("http", host, portOr(if (scheme == "https") 443 else 80)) {
++                credentials(user)
++                if (scheme == "https") tls(q, default = true)
++            }
++            "naive+https", "naive+http" -> obj("naive", host, portOr(443)) {
++                credentials(user)
++                tls(q, default = true)
++            }
++            "ssh" -> obj("ssh", host, portOr(22)) {
++                val (u, p) = (user ?: "root").split(':', limit = 2).let { it[0] to it.getOrNull(1) }
++                put("user", u)
++                p?.let { put("password", it) }
++            }
++            else -> throw IllegalArgumentException("unsupported link type")
++        }
++        return ProxyServer(name ?: defaultName(scheme, host, uri.port), options)
++    }
++
++    /** vmess://base64({"v":"2","ps":name,"add":host,"port":..,"id":uuid,"net":"ws","tls":"tls",...}) */
++    private fun vmess(link: String): ProxyServer {
++        val raw = link.substringAfter("://").substringBefore('#')
++        val json = decodeBase64(raw) ?: throw IllegalArgumentException("not a v2rayN vmess link")
++        val v = io.nekohasekai.sfa.bitproxy.providers.Http.json(json).jsonObject
++        fun f(k: String) = v[k]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }
++        val host = f("add") ?: throw IllegalArgumentException("no server address")
++        val port = f("port")?.toIntOrNull() ?: 443
++        val q = buildMap {
++            f("net")?.let { put("type", it) }
++            f("path")?.let { put("path", it) }
++            f("host")?.let { put("host", it) }
++            f("path")?.takeIf { f("net") == "grpc" }?.let { put("serviceName", it) }
++            f("sni")?.let { put("sni", it) }
++            f("alpn")?.let { put("alpn", it) }
++            f("fp")?.let { put("fp", it) }
++            if (f("tls") == "tls") put("security", "tls")
++            if (f("allowInsecure") == "1" || f("allowInsecure") == "true") put("allowInsecure", "1")
++        }
++        val options = obj("vmess", host, port) {
++            put("uuid", f("id") ?: throw IllegalArgumentException("no UUID"))
++            put("security", f("scy") ?: "auto")
++            put("alter_id", f("aid")?.toIntOrNull() ?: 0)
++            put("packet_encoding", "xudp")
++            tls(q, default = false)
++            transport(q)
++        }
++        return ProxyServer(f("ps") ?: defaultName("vmess", host, port), options)
++    }
++
++    /** SIP002 ss://base64(method:password)@host:port or ss://method:password@host:port, and the old ss://base64(all). */
++    private fun shadowsocks(link: String): ProxyServer {
++        var body = link.substringAfter("://")
++        val name = body.substringAfter('#', "").takeIf { it.isNotBlank() }?.let(::decode)
++        body = body.substringBefore('#')
++        val query = query(body.substringAfter('?', ""))
++        body = body.substringBefore('?').removeSuffix("/")
++        if ('@' !in body) body = decodeBase64(body) ?: throw IllegalArgumentException("unreadable ss link")
++        val userInfo = body.substringBeforeLast('@')
++        val hostPort = body.substringAfterLast('@')
++        val creds = if (':' in decode(userInfo)) decode(userInfo) else decodeBase64(userInfo) ?: throw IllegalArgumentException("unreadable method/password")
++        val method = creds.substringBefore(':')
++        val password = creds.substringAfter(':')
++        val host = hostPort.substringBeforeLast(':').removeSurrounding("[", "]")
++        val port = hostPort.substringAfterLast(':').toIntOrNull() ?: throw IllegalArgumentException("no port")
++        val options = obj("shadowsocks", host, port) {
++            put("method", method)
++            put("password", password)
++            query["plugin"]?.takeIf { it.isNotBlank() }?.let { plugin ->
++                put("plugin", plugin.substringBefore(';'))
++                plugin.substringAfter(';', "").takeIf { it.isNotBlank() }?.let { put("plugin_opts", it) }
++            }
++        }
++        return ProxyServer(name ?: defaultName("ss", host, port), options)
++    }
++
++    private fun obj(type: String, host: String, port: Int, body: JsonObjectBuilder.() -> Unit): JsonObject = buildJsonObject {
++        put("type", type)
++        put("server", host)
++        put("server_port", port)
++        body()
++    }
++
++    private fun JsonObjectBuilder.credentials(user: String?) {
++        user ?: return
++        // Some clients base64 the whole user:pass.
++        val plain = if (':' in user) user else decodeBase64(user)?.takeIf { ':' in it } ?: user
++        put("username", plain.substringBefore(':'))
++        plain.substringAfter(':', "").takeIf { it.isNotEmpty() }?.let { put("password", it) }
++    }
++
++    /** security=tls|reality|none, sni, alpn, fp, pbk, sid, allowInsecure/insecure. */
++    private fun JsonObjectBuilder.tls(q: Map<String, String>, default: Boolean, quic: Boolean = false) {
++        val security = q["security"]?.lowercase()
++        val enabled = when (security) {
++            "tls", "reality", "xtls" -> true
++            "none", "" -> false
++            else -> default
++        }
++        if (!enabled && !quic) return
++        putJsonObject("tls") {
++            put("enabled", true)
++            (q["sni"] ?: q["peer"])?.takeIf { it.isNotBlank() }?.let { put("server_name", it) }
++            if (q["allowInsecure"] == "1" || q["insecure"] == "1" || q["allow_insecure"] == "1" || q["allowInsecure"] == "true") put("insecure", true)
++            q["alpn"]?.takeIf { it.isNotBlank() }?.let { alpn -> putJsonArray("alpn") { alpn.split(',').forEach { add(it.trim()) } } }
++            val fp = q["fp"]?.takeIf { it.isNotBlank() && it != "none" }
++            if (fp != null || security == "reality") {
++                putJsonObject("utls") {
++                    put("enabled", true)
++                    put("fingerprint", fp ?: "chrome")
++                }
++            }
++            if (security == "reality") {
++                putJsonObject("reality") {
++                    put("enabled", true)
++                    put("public_key", q["pbk"] ?: throw IllegalArgumentException("REALITY link without public key (pbk)"))
++                    q["sid"]?.let { put("short_id", it) }
++                }
++            }
++        }
++    }
++
++    /** type=tcp|ws|grpc|http|h2|httpupgrade with path, host, serviceName. */
++    private fun JsonObjectBuilder.transport(q: Map<String, String>) {
++        when (val type = q["type"]?.lowercase() ?: "tcp") {
++            "tcp", "", "raw" -> Unit
++            "ws" -> putJsonObject("transport") {
++                put("type", "ws")
++                var path = q["path"] ?: "/"
++                // "?ed=2048" in the path is Xray's early data: sing-box has its own fields for it.
++                Regex("""[?&]ed=(\d+)""").find(path)?.let {
++                    put("max_early_data", it.groupValues[1].toInt())
++                    put("early_data_header_name", "Sec-WebSocket-Protocol")
++                    path = path.replace(it.value, "").ifEmpty { "/" }
++                }
++                put("path", path)
++                q["host"]?.takeIf { it.isNotBlank() }?.let { h -> putJsonObject("headers") { put("Host", h) } }
++            }
++            "grpc" -> putJsonObject("transport") {
++                put("type", "grpc")
++                put("service_name", q["serviceName"] ?: q["path"].orEmpty())
++            }
++            "http", "h2" -> putJsonObject("transport") {
++                put("type", "http")
++                q["path"]?.let { put("path", it) }
++                q["host"]?.takeIf { it.isNotBlank() }?.let { h -> putJsonArray("host") { h.split(',').forEach { add(it) } } }
++            }
++            "httpupgrade" -> putJsonObject("transport") {
++                put("type", "httpupgrade")
++                q["path"]?.let { put("path", it) }
++                q["host"]?.takeIf { it.isNotBlank() }?.let { put("host", it) }
++            }
++            else -> throw IllegalArgumentException("transport \"$type\" is not supported by sing-box")
++        }
++    }
++
++    private fun query(raw: String?): Map<String, String> = raw.orEmpty().split('&').filter { '=' in it }
++        .associate { decode(it.substringBefore('=')) to decode(it.substringAfter('=')) }
++
++    private fun decode(s: String): String = URLDecoder.decode(s.replace("+", "%2B"), "UTF-8")
++
++    private fun decodeBase64(s: String): String? {
++        val t = s.trim().replace('-', '+').replace('_', '/').trimEnd('=')
++        if (t.isEmpty() || !t.all { it.isLetterOrDigit() || it == '+' || it == '/' }) return null
++        return runCatching { Base64.decode(t + "=".repeat((4 - t.length % 4) % 4)).decodeToString() }.getOrNull()
++    }
++
++    private fun defaultName(scheme: String, host: String, port: Int) = "$scheme $host${if (port > 0) ":$port" else ""}"
++}
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+index 2fba993..69cdc76 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyScreen.kt
+@@ -126,6 +126,8 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+     var domains by remember { mutableStateOf(BitProxyPrefs.vpnDomains.joinToString("\n")) }
+     val context = LocalContext.current
+     var confirmDelete by remember { mutableStateOf<StoredServer?>(null) }
++    var loginFor by remember { mutableStateOf<StoredServer?>(null) }
++    var pasteOpen by remember { mutableStateOf(false) }
+     val appCounts = remember { BitProxyPrefs.apps.values.groupingBy { it }.eachCount() }
+ 
+     LaunchedEffect(reload) {
+@@ -136,7 +138,7 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+     val importLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+         if (uris.isEmpty()) return@rememberLauncherForActivityResult
+         scope.launch {
+-            val results = withContext(Dispatchers.IO) { uris.map(BitProxyStore::import) }
++            val results = withContext(Dispatchers.IO) { uris.flatMap(BitProxyStore::import) }
+             message = results.joinToString("\n\n") { (if (it.ok) "✓ " else "✗ ") + it.message }
+             reload++
+         }
+@@ -157,20 +159,20 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+             Text("Servers", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(16.dp, 16.dp, 16.dp, 4.dp))
+             if (servers.isEmpty()) {
+                 Text(
+-                    "No servers yet. Import WireGuard .conf files (for example from Proton VPN), share them to BitProxy, or log in to a VPN provider below.",
++                    "No servers yet. Import server files or links, share them to BitProxy, or log in to a VPN provider below.",
+                     style = MaterialTheme.typography.bodyMedium,
+                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                 )
+             }
+             val selectedAddress = servers.firstOrNull { it.tag == selected }?.conf?.ipv4Address?.address
+             for (server in servers) {
+-                val sameAddress = server.conf.ipv4Address.address == selectedAddress
++                val sameAddress = server.conf == null || server.conf.ipv4Address.address == selectedAddress
+                 ListItem(
+                     headlineContent = { Text(server.tag) },
+                     supportingContent = {
+-                        val peer = server.conf.peers.first()
+                         Text(
+-                            "${peer.host}:${peer.port} · tunnel ${server.conf.ipv4Address.address}" +
++                            server.summary +
++                                (if (server.needsLogin) "\nNeeds username and password: tap to add" else "") +
+                                 if (!sameAddress) "\nDifferent tunnel address: selecting it switches the whole config" else "",
+                         )
+                     },
+@@ -184,6 +186,7 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+                         IconButton(onClick = { confirmDelete = server }) { Icon(Icons.Outlined.Delete, contentDescription = "Delete") }
+                     },
+                     modifier = Modifier.clickable {
++                        if (server.needsLogin) loginFor = server
+                         selected = server.tag
+                         BitProxyPrefs.selectedServer = server.tag
+                     },
+@@ -212,12 +215,19 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+                     colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                 )
+             }
+-            FilledTonalButton(
+-                onClick = { importLauncher.launch(arrayOf("*/*")) },
+-                modifier = Modifier.padding(16.dp),
+-            ) {
+-                Icon(Icons.Outlined.FileOpen, contentDescription = null)
+-                Text("  Import .conf files")
++            Text(
++                "WireGuard (.conf), OpenVPN (.ovpn), sing-box JSON, share links (vless://, vmess://, trojan://, ss://, " +
++                    "hy2://, tuic://, …) and subscription URLs.",
++                style = MaterialTheme.typography.bodySmall,
++                color = MaterialTheme.colorScheme.onSurfaceVariant,
++                modifier = Modifier.padding(horizontal = 16.dp),
++            )
++            Row(Modifier.padding(16.dp)) {
++                FilledTonalButton(onClick = { importLauncher.launch(arrayOf("*/*")) }) {
++                    Icon(Icons.Outlined.FileOpen, contentDescription = null)
++                    Text("  Import files")
++                }
++                TextButton(onClick = { pasteOpen = true }) { Text("Paste links / URL") }
+             }
+         }
+         ProvidersCard(onServersChanged = { reload++ })
+@@ -331,6 +341,70 @@ fun BitProxyScreen(navController: NavController, serviceStatus: Status) {
+             confirmButton = { TextButton(onClick = { message = null }) { Text("OK") } },
+         )
+     }
++    if (pasteOpen) {
++        var text by remember { mutableStateOf("") }
++        var busy by remember { mutableStateOf(false) }
++        AlertDialog(
++            onDismissRequest = { if (!busy) pasteOpen = false },
++            title = { Text("Paste servers") },
++            text = {
++                OutlinedTextField(
++                    value = text,
++                    onValueChange = { text = it },
++                    placeholder = { Text("vless://…, ss://…, a subscription URL, sing-box JSON or a .conf") },
++                    minLines = 4,
++                    maxLines = 10,
++                    modifier = Modifier.fillMaxWidth(),
++                )
++            },
++            confirmButton = {
++                TextButton(enabled = !busy && text.isNotBlank(), onClick = {
++                    busy = true
++                    scope.launch {
++                        val results = withContext(Dispatchers.IO) { BitProxyStore.importText(text, "pasted") }
++                        message = results.joinToString("\n\n") { (if (it.ok) "✓ " else "✗ ") + it.message }.ifEmpty { "Nothing found to import" }
++                        busy = false
++                        pasteOpen = false
++                        reload++
++                    }
++                }) { Text(if (busy) "Importing…" else "Import") }
++            },
++            dismissButton = { TextButton(enabled = !busy, onClick = { pasteOpen = false }) { Text("Cancel") } },
++        )
++    }
++    loginFor?.let { server ->
++        var user by remember { mutableStateOf("") }
++        var pass by remember { mutableStateOf("") }
++        AlertDialog(
++            onDismissRequest = { loginFor = null },
++            title = { Text("Login for ${server.tag}") },
++            text = {
++                Column {
++                    OutlinedTextField(value = user, onValueChange = { user = it }, label = { Text("Username") }, singleLine = true)
++                    OutlinedTextField(
++                        value = pass,
++                        onValueChange = { pass = it },
++                        label = { Text("Password") },
++                        singleLine = true,
++                        visualTransformation = androidx.compose.ui.text.input.PasswordVisualTransformation(),
++                    )
++                    Text("For Proton VPN: the OpenVPN / IKEv2 username and password from account.protonvpn.com, not your Proton login.", style = MaterialTheme.typography.bodySmall)
++                }
++            },
++            confirmButton = {
++                TextButton(enabled = user.isNotBlank(), onClick = {
++                    loginFor = null
++                    scope.launch {
++                        withContext(Dispatchers.IO) {
++                            BitProxyStore.saveProxy(server.proxy!!.copy(options = io.nekohasekai.sfa.bitproxy.servers.OpenVpnProfile.withLogin(server.proxy.options, user.trim(), pass)))
++                        }
++                        reload++
++                    }
++                }) { Text("Save") }
++            },
++            dismissButton = { TextButton(onClick = { loginFor = null }) { Text("Cancel") } },
++        )
++    }
+     confirmDelete?.let { server ->
+         AlertDialog(
+             onDismissRequest = { confirmDelete = null },
+diff --git a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DiagnosticsScreen.kt b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DiagnosticsScreen.kt
+index a04f886..00a3f85 100644
+--- a/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DiagnosticsScreen.kt
++++ b/app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/DiagnosticsScreen.kt
+@@ -111,7 +111,7 @@ private suspend fun collectReport(serviceStatus: Status): String = withContext(D
+ 
+ /** Report + applied config + this app's recent logcat, with every private/preshared key masked. */
+ private suspend fun exportLog(context: Context, report: String): File = withContext(Dispatchers.IO) {
+-    val secrets = BitProxyStore.servers().flatMap { s -> listOf(s.conf.privateKey) + s.conf.peers.mapNotNull { it.presharedKey } }
++    val secrets = BitProxyStore.servers().flatMap { s -> listOfNotNull(s.conf?.privateKey) + s.conf?.peers.orEmpty().mapNotNull { it.presharedKey } }
+     val config = ProfileManager.get(BitProxyPrefs.profileId)?.let { runCatching { File(it.typed.path).readText() }.getOrNull() } ?: "(none)"
+     val logcat = runCatching {
+         val p = ProcessBuilder("logcat", "-d", "-v", "time", "--pid=${Process.myPid()}", "-t", "2000").redirectErrorStream(true).start()
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/RedactorTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/RedactorTest.kt
+index fd40ddf..329e24d 100644
+--- a/app/src/test/java/io/nekohasekai/sfa/bitproxy/RedactorTest.kt
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/RedactorTest.kt
+@@ -31,4 +31,13 @@ class RedactorTest {
+     @Test fun knownSecretsAnywhere() {
+         assertEquals("log: key=[REDACTED] end", Redactor.redact("log: key=$priv end", listOf(priv)))
+     }
++
++    @Test fun proxyAndOpenVpnSecrets() {
++        val json = """{"type":"vless","uuid":"2ac6f397-4c38-4907-8644-6e1c1e7166ff","password":"pw1","tls":{"client_key":["-----BEGIN PRIVATE KEY-----","SECRETLINE"]}}"""
++        val out = Redactor.redact(json)
++        assertFalse("2ac6f397" in out)
++        assertFalse("pw1" in out)
++        assertFalse("SECRETLINE" in out)
++        assertTrue("\"type\":\"vless\"" in out)
++    }
+ }
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
+index e1cd7b3..901ae44 100644
+--- a/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/config/ConfigGeneratorTest.kt
+@@ -222,4 +222,31 @@ class ConfigGeneratorTest {
+     @Test fun noServersIsAnError() {
+         assertTrue(ConfigGenerator.generate(GeneratorInput(emptyList(), null, twoServerApps)) is GenerateResult.Error)
+     }
++
++    private val vless = ProxyServer("My VLESS", Json.parseToJsonElement("""{"type":"vless","server":"example.com","server_port":443,"uuid":"2ac6f397-4c38-4907-8644-6e1c1e7166ff"}""").jsonObject)
++    private val ovpn = ProxyServer("My OVPN", Json.parseToJsonElement("""{"type":"openvpn-client","server":"vpn.example.com","server_port":1194}""").jsonObject)
++
++    @Test fun proxiesJoinAWireGuardGroup() {
++        val r = ok(GeneratorInput(servers("two-servers"), null, twoServerApps, proxies = listOf(vless, ovpn)))
++        assertFalse(r.allWireGuard)
++        val vpn = r.config["outbounds"]!!.jsonArray.first().jsonObject
++        assertTrue("my-vless" in vpn["outbounds"].toString() && "my-ovpn" in vpn["outbounds"].toString())
++        assertTrue(r.config["endpoints"].toString().contains("\"my-ovpn\""))
++        assertTrue(r.config["outbounds"].toString().contains("\"my-vless\""))
++        val remote = r.config["dns"]!!.jsonObject["servers"]!!.jsonArray[1].jsonObject
++        assertEquals("tcp", remote["type"]!!.jsonPrimitive.content)
++    }
++
++    @Test fun selectedProxyUsesDefaultTunAndLeavesWireGuardOut() {
++        val r = ok(GeneratorInput(servers("two-servers"), "my-vless", twoServerApps, proxies = listOf(vless)))
++        assertEquals(listOf("172.19.0.1/30"), r.tunAddresses)
++        assertEquals("my-vless", r.selectedTag)
++        assertEquals(2, r.otherAddressServers.size)
++        assertFalse(r.config["endpoints"].toString().contains("wireguard"))
++    }
++
++    @Test fun wireGuardOnlyKeepsUdpDnsAndHealthCheck() {
++        val r = ok(GeneratorInput(servers("two-servers"), null, twoServerApps))
++        assertTrue(r.allWireGuard)
++    }
+ }
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/servers/OpenVpnProfileTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/servers/OpenVpnProfileTest.kt
+new file mode 100644
+index 0000000..e402392
+--- /dev/null
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/servers/OpenVpnProfileTest.kt
+@@ -0,0 +1,58 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.servers
++
++import kotlinx.serialization.json.jsonArray
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertFalse
++import org.junit.Assert.assertTrue
++import org.junit.Test
++
++class OpenVpnProfileTest {
++    // Shape of a provider export; certificate and key bodies are dummies.
++    private val ovpn = """
++        client
++        dev tun
++        proto udp
++        remote a.example.com 1194
++        remote b.example.com 443 tcp
++        remote-random
++        cipher AES-256-GCM
++        auth SHA512
++        auth-user-pass
++        remote-cert-tls server
++        verify-x509-name server.example.com name
++        key-direction 1
++        <ca>
++        -----BEGIN CERTIFICATE-----
++        AAAA
++        -----END CERTIFICATE-----
++        </ca>
++        <tls-auth>
++        -----BEGIN OpenVPN Static key V1-----
++        BBBB
++        -----END OpenVPN Static key V1-----
++        </tls-auth>
++    """.trimIndent()
++
++    @Test fun providerProfile() {
++        assertTrue(OpenVpnProfile.looksLikeOvpn(ovpn))
++        val o = OpenVpnProfile.parse(ovpn, "Provider").server.options
++        val servers = o["servers"]!!.jsonArray.map { it.jsonObject }
++        assertEquals(listOf("udp", "tcp"), servers.map { it["network"]!!.jsonPrimitive.content })
++        assertEquals("443", servers[1]["server_port"]!!.jsonPrimitive.content)
++        val tls = o["tls"]!!.jsonObject
++        assertEquals("server.example.com", tls["server_name"]!!.jsonPrimitive.content)
++        assertEquals("tls_auth", tls["control_wrap"]!!.jsonObject["type"]!!.jsonPrimitive.content)
++        assertEquals("client", tls["control_wrap"]!!.jsonObject["direction"]!!.jsonPrimitive.content)
++        assertEquals(3, tls["certificate"]!!.jsonArray.size)
++        assertTrue(OpenVpnProfile.needsLogin(o))
++        assertFalse(OpenVpnProfile.needsLogin(OpenVpnProfile.withLogin(o, "user", "pw")))
++    }
++
++    @Test(expected = IllegalArgumentException::class)
++    fun separateCaFileIsRejected() {
++        OpenVpnProfile.parse("client\ndev tun\nremote a.example 1194\nca ca.crt\n", "x")
++    }
++}
+diff --git a/app/src/test/java/io/nekohasekai/sfa/bitproxy/servers/ShareLinksTest.kt b/app/src/test/java/io/nekohasekai/sfa/bitproxy/servers/ShareLinksTest.kt
+new file mode 100644
+index 0000000..96a5a2f
+--- /dev/null
++++ b/app/src/test/java/io/nekohasekai/sfa/bitproxy/servers/ShareLinksTest.kt
+@@ -0,0 +1,84 @@
++// SPDX-License-Identifier: GPL-3.0-or-later
++package io.nekohasekai.sfa.bitproxy.servers
++
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.jsonArray
++import kotlinx.serialization.json.jsonObject
++import kotlinx.serialization.json.jsonPrimitive
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertTrue
++import org.junit.Test
++import kotlin.io.encoding.Base64
++import kotlin.io.encoding.ExperimentalEncodingApi
++
++/** Dummy UUIDs, passwords and keys only. */
++@OptIn(ExperimentalEncodingApi::class)
++class ShareLinksTest {
++    private val uuid = "2ac6f397-4c38-4907-8644-6e1c1e7166ff"
++
++    private fun one(link: String) = ShareLinks.parse(link).also { assertEquals(emptyList<String>(), it.errors) }.servers.single()
++    private fun JsonObject.s(path: String): String? = path.split('.').fold(this as kotlinx.serialization.json.JsonElement?) { e, k -> (e as? JsonObject)?.get(k) }?.jsonPrimitive?.content
++
++    @Test fun vlessRealityVision() {
++        val p = one("vless://$uuid@example.com:443?security=reality&sni=www.microsoft.com&fp=chrome&pbk=PUBKEY&sid=0123abcd&flow=xtls-rprx-vision&type=tcp#My%20Server")
++        assertEquals("My Server", p.name)
++        assertEquals("vless", p.type)
++        assertEquals("xtls-rprx-vision", p.options.s("flow"))
++        assertEquals("PUBKEY", p.options.s("tls.reality.public_key"))
++        assertEquals("chrome", p.options.s("tls.utls.fingerprint"))
++        assertEquals("www.microsoft.com", p.options.s("tls.server_name"))
++    }
++
++    @Test fun vlessWebSocketEarlyData() {
++        val p = one("vless://$uuid@example.com:443?security=tls&type=ws&host=cdn.example.com&path=%2Fws%3Fed%3D2048#ws")
++        assertEquals("/ws", p.options.s("transport.path"))
++        assertEquals("2048", p.options.s("transport.max_early_data"))
++        assertEquals("cdn.example.com", p.options.s("transport.headers.Host"))
++    }
++
++    @Test fun vmessV2rayN() {
++        val json = """{"v":"2","ps":"vm","add":"example.com","port":"8443","id":"$uuid","aid":"0","net":"grpc","path":"svc","tls":"tls","sni":"example.com"}"""
++        val p = one("vmess://" + Base64.encode(json.toByteArray()))
++        assertEquals("vm", p.name)
++        assertEquals("8443", p.options.s("server_port"))
++        assertEquals("grpc", p.options.s("transport.type"))
++        assertEquals("svc", p.options.s("transport.service_name"))
++        assertEquals("true", p.options.s("tls.enabled"))
++    }
++
++    @Test fun shadowsocksForms() {
++        val sip002 = one("ss://" + Base64.encode("aes-256-gcm:pa+ss".toByteArray()).trimEnd('=') + "@1.2.3.4:8388#ss")
++        assertEquals("aes-256-gcm", sip002.options.s("method"))
++        assertEquals("pa+ss", sip002.options.s("password"))
++        val plain = one("ss://2022-blake3-aes-128-gcm:c2VjcmV0c2VjcmV0MTIzNA%3D%3D@[2001:db8::1]:443#v6")
++        assertEquals("2001:db8::1", plain.options.s("server"))
++        assertEquals("c2VjcmV0c2VjcmV0MTIzNA==", plain.options.s("password"))
++        val legacy = one("ss://" + Base64.encode("chacha20-ietf-poly1305:pw@host.example:1234".toByteArray()) + "#old")
++        assertEquals("host.example", legacy.options.s("server"))
++    }
++
++    @Test fun quicProtocols() {
++        val hy2 = one("hy2://secret@example.com:443?sni=a.example&obfs=salamander&obfs-password=x&insecure=1#h")
++        assertEquals("hysteria2", hy2.type)
++        assertEquals("salamander", hy2.options.s("obfs.type"))
++        assertEquals("true", hy2.options.s("tls.insecure"))
++        val tuic = one("tuic://$uuid:pw@example.com:443?congestion_control=bbr#t")
++        assertEquals("pw", tuic.options.s("password"))
++        assertEquals("h3", tuic.options["tls"]!!.jsonObject["alpn"]!!.jsonArray.single().jsonPrimitive.content)
++    }
++
++    @Test fun trojanSocksHttpAnytls() {
++        assertEquals("true", one("trojan://pw@example.com:443#t").options.s("tls.enabled"))
++        val socks = one("socks://u:p@1.2.3.4:1080#s")
++        assertEquals("u", socks.options.s("username"))
++        assertEquals("443", one("https://u:p@proxy.example#h").options.s("server_port"))
++        assertEquals("anytls", one("anytls://pw@example.com:443#a").type)
++    }
++
++    @Test fun base64SubscriptionAndErrors() {
++        val sub = Base64.encode("trojan://pw@a.example:443#one\nvless://$uuid@b.example:443?type=xhttp#bad\n".toByteArray())
++        val r = ShareLinks.parse(sub)
++        assertEquals(listOf("one"), r.servers.map { it.name })
++        assertTrue(r.errors.single().contains("xhttp"))
++    }
++}
+-- 
+2.55.0
+

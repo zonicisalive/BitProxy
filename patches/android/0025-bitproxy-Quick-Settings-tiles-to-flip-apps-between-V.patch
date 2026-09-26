@@ -1,7 +1,7 @@
 From ff4d9618d630247f60cdf11a3cbd58fea1184cc7 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:27:48 +0530
-Subject: [PATCH 25/39] bitproxy: Quick Settings tiles to flip apps between VPN
+Subject: [PATCH 25/41] bitproxy: Quick Settings tiles to flip apps between VPN
  and Direct
 
 Three tile slots ('BitProxy app 1..3', tiles must be declared in the

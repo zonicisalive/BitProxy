@@ -1,7 +1,7 @@
 From e82fafb198380ba2d0d51cfeba7dd63d8a075cb1 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:18:21 +0530
-Subject: [PATCH 23/39] bitproxy: live upload/download per app on the dashboard
+Subject: [PATCH 23/41] bitproxy: live upload/download per app on the dashboard
 
 The Apps card shows each app's current speed next to its name, summed
 per uid from sing-box connection events (listed apps always carry their

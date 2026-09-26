@@ -1,7 +1,7 @@
 From 5c13116e8b691c5167a27edf043cbc6bb34e9bf0 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:38:10 +0530
-Subject: [PATCH 13/39] bitproxy: diagnostics screen with redacted log export
+Subject: [PATCH 13/41] bitproxy: diagnostics screen with redacted log export
 
 Settings > BitProxy > Diagnostics shows VPN state, Always-on / Block,
 tunnel and phone DNS address, server group, remote DNS and strategy,
