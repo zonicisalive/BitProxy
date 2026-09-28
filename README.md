@@ -70,6 +70,10 @@ update source: it only has the original sing-box app.
       within 30 min.
     - libbox is built with a Go whose timers keep counting in deep sleep (as in
       WireGuard's and Proton's apps), so the tunnel isn't stale after the night.
+    - Android (seen on OxygenOS 16) can destroy the socket sing-box uses for TCP while the
+      VPN is rebuilt; every new TCP connection was then refused until a restart. The
+      patched sing-tun listens again within 0.1 s.
+    - Apply with an unchanged config doesn't reload, so connections aren't interrupted.
 - **Diagnostics:** tunnel, DNS, IPv6 and Always-on state, clone detection, last Apply, and a
   **Recent events** log that survives the night. The export removes all private keys.
 
@@ -105,6 +109,7 @@ recovers from it, but the phone has no network in that time.
 | `versions.env` | Pinned sing-box tag, SFA commit, Go / NDK / gomobile versions |
 | `patches/android/` | BitProxy commits on top of SFA (new code lives in `io.nekohasekai.sfa.bitproxy`) |
 | `patches/core/` | Commits on top of sing-box (none so far) |
+| `patches/sing-tun/` | Commits on top of sing-tun (sing-box's TUN library): re-listen when Android destroys the TCP socket |
 | `build-release.sh` | Fresh clone of pinned upstream, apply patches, build libbox + APK, run unit tests |
 | `.github/workflows/release.yml` | The same build on GitHub, signed and published as a release |
 | `.github/workflows/auto-update.yml` | Daily: build and release new upstream versions automatically |
@@ -112,6 +117,7 @@ recovers from it, but the phone has no network in that time.
 | `run.sh`, `gw` | Build + run on the emulator (never on a connected phone); Gradle with the right toolchain |
 | `check-upstream.sh` | Try all patches on a newer upstream: apply, build libbox + APK, run unit tests |
 | `export-patches.sh` | Regenerate `patches/` from the local `bitproxy` branches |
+| `prepare-sing-tun.sh` | Clones the sing-tun version sing-box requires, applies `patches/sing-tun`, points sing-box at it (used by every build) |
 | `find-sfa-commit.sh` | Finds the sing-box-for-android commit released as a given version (used by auto-update) |
 | `go-boottime.sh` | Go toolchain copy whose timers count deep sleep, used to build libbox |
 | `make-keystore.sh` | Optional helper to create a release signing key |
@@ -194,7 +200,8 @@ release already exists (patch changes on the same upstream).
    `ConfigGenerator` and the golden tests if anything BitProxy writes changed.
 3. In the local checkouts: `git switch -c bitproxy-new <new tag / commit>` and
    `git am -3 <this repo>/patches/…/*.patch`. Fix conflicts, rebuild libbox, and
-   run the unit tests.
+   run the unit tests. For sing-tun, the base is the version in sing-box's `go.mod`
+   (`prepare-sing-tun.sh` and `export-patches.sh` read it).
 4. Update `versions.env`, run `./export-patches.sh`, commit.
 
 ## Testing checklist (before each release)

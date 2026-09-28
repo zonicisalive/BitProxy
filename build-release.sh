@@ -24,6 +24,7 @@ apply() { # repo dir, patch dir
 }
 apply sing-box "$ROOT/patches/core"
 apply sing-box-for-android "$ROOT/patches/android"
+"$ROOT/prepare-sing-tun.sh" sing-box "$W"
 
 # BitProxy version code = upstream code * 1000 + build number (BITPROXY_BUILD, set by the release
 # workflow; 0 for local builds). It always grows, so the in-app updater offers patch-only releases.

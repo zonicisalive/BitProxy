@@ -11,3 +11,4 @@ local.properties
 *.conf.txt
 singbox_profile.json
 /reference/
+/sing-tun

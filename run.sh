@@ -11,7 +11,10 @@ cd "$(dirname "$(readlink -f "$0")")/sing-box"
 if [ "${1:-}" = core ]; then
   # Same Go clock patch as release builds (go-boottime.sh).
   GO_BT=$(../go-boottime.sh "$DEV/go-boottime")
-  (export GOROOT=$GO_BT PATH="$GO_BT/bin:$PATH" && go run ./cmd/internal/build_libbox -target android -platform android/amd64,android/arm64)
+  # Patched sing-tun from the local ../sing-tun checkout (branch bitproxy); go.mod is restored after.
+  [ -d ../sing-tun ] && go mod edit -replace "github.com/sagernet/sing-tun=$(cd ../sing-tun && pwd)"
+  (export GOROOT=$GO_BT PATH="$GO_BT/bin:$PATH" && go run ./cmd/internal/build_libbox -target android -platform android/amd64,android/arm64) || { git checkout -q go.mod go.sum; exit 1; }
+  git checkout -q go.mod go.sum
   mkdir -p clients/android/app/libs && cp libbox*.aar clients/android/app/libs/
 fi
 
