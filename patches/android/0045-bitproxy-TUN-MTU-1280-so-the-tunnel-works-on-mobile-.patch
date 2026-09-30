@@ -1,7 +1,7 @@
 From a1dd5fd283ea5e63ed17478b04013f22d74c0958 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 18:34:36 +0530
-Subject: [PATCH 45/45] bitproxy: TUN MTU 1280 so the tunnel works on mobile
+Subject: [PATCH 45/46] bitproxy: TUN MTU 1280 so the tunnel works on mobile
  data
 
 On Jio (IPv6-only with 464XLAT) the mobile link allows 1372-byte
