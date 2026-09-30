@@ -1,7 +1,7 @@
 From f25182dc2fbe28063e8115ebfbc78d0f83bc2d15 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 15:05:24 +0530
-Subject: [PATCH 44/44] bitproxy: default TUN stack again (patched sing-tun
+Subject: [PATCH 44/45] bitproxy: default TUN stack again (patched sing-tun
  re-listens); no reload when the config is unchanged
 
 The gvisor stack avoided the destroyed-listener bug but handles all TCP
