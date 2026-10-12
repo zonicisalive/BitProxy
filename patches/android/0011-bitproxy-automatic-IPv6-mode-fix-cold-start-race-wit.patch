@@ -1,4 +1,4 @@
-From d915bda4938bec5a08612fad4babfb4c394e3c96 Mon Sep 17 00:00:00 2001
+From 1b731a7859cdfdefe5fb6414ec8c442bc67ce382 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:29:44 +0530
 Subject: [PATCH 11/46] bitproxy: automatic IPv6 mode; fix cold-start race with
@@ -32,10 +32,10 @@ Upstream hooks: 1 line in Application, 3 in BoxService.
  create mode 100644 app/src/test/java/io/nekohasekai/sfa/bitproxy/Ipv6DetectTest.kt
 
 diff --git a/app/src/main/java/io/nekohasekai/sfa/Application.kt b/app/src/main/java/io/nekohasekai/sfa/Application.kt
-index 5255583..99c843d 100644
+index 402af8e..d983093 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/Application.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/Application.kt
-@@ -18,6 +18,7 @@ import io.nekohasekai.sfa.bg.CrashReportManager
+@@ -19,6 +19,7 @@ import io.nekohasekai.sfa.bg.CrashReportManager
  import io.nekohasekai.sfa.bg.OOMReportManager
  import io.nekohasekai.sfa.bg.PowerReportManager
  import io.nekohasekai.sfa.bg.UpdateProfileWork
@@ -43,7 +43,7 @@ index 5255583..99c843d 100644
  import io.nekohasekai.sfa.compose.screen.tools.TaildropFiles
  import io.nekohasekai.sfa.constant.Bugs
  import io.nekohasekai.sfa.database.Settings
-@@ -68,6 +69,7 @@ class Application : Application() {
+@@ -70,6 +71,7 @@ class Application : Application() {
              HookStatusClient.register(this@Application)
              PrivilegeSettingsClient.register(this@Application)
              initialize(baseDir, workingDir, tempDir)
@@ -52,7 +52,7 @@ index 5255583..99c843d 100644
              HookModuleUpdateNotifier.sync(this@Application)
              TaildropFiles.cleanCache()
 diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
-index e3d4315..77c150b 100644
+index cfb6846..1a833ce 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 @@ -187,6 +187,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
@@ -280,5 +280,5 @@ index 0000000..07aa0ec
 +    @Test fun globalAddressWithoutDefaultRoute() = assertFalse(Ipv6Detect.hasGlobalIpv6(a("2001:db8::5"), false))
 +}
 -- 
-2.55.0
+2.56.0
 

@@ -1,4 +1,4 @@
-From 1c9cbc784f76d9cbf1e112c2855be625d41ed467 Mon Sep 17 00:00:00 2001
+From d0a4162c41633bb61977369c4dab0a8d8fc23fce Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Thu, 24 Sep 2026 23:47:06 +0530
 Subject: [PATCH 04/46] bitproxy: sing-box config generator with golden tests
@@ -602,7 +602,7 @@ index 0000000..b2f1490
 +package:ch.protonmail.android uid:10200
 diff --git a/app/src/test/resources/bitproxy/golden/edge-cases/wg.conf.wgtest b/app/src/test/resources/bitproxy/golden/edge-cases/wg.conf.wgtest
 new file mode 100644
-index 0000000..154dd7a
+index 0000000..faaceb4
 --- /dev/null
 +++ b/app/src/test/resources/bitproxy/golden/edge-cases/wg.conf.wgtest
 @@ -0,0 +1,16 @@
@@ -901,5 +901,5 @@ index 0000000..b458a83
 +package:com.whatsapp.w4b uid:10150,99910150
 +package:com.discord uid:10160,1010160,99910160
 -- 
-2.55.0
+2.56.0
 

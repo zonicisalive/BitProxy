@@ -1,4 +1,4 @@
-From deb3268ee38817f293dbe4ab010e127de377b1de Mon Sep 17 00:00:00 2001
+From 635baf7f35cecd79c2bbcc0a87014282943916fa Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Thu, 24 Sep 2026 23:37:14 +0530
 Subject: [PATCH 02/46] bitproxy: rename app to BitProxy
@@ -29,7 +29,7 @@ index 85b7869..006ee94 100644
          targetSdk = 37
          versionCode = getVersionProps("VERSION_CODE").toInt()
 diff --git a/app/src/main/res/values-fa/strings.xml b/app/src/main/res/values-fa/strings.xml
-index d6ae7e1..5dfb617 100644
+index d2aeb5b..e0f7960 100644
 --- a/app/src/main/res/values-fa/strings.xml
 +++ b/app/src/main/res/values-fa/strings.xml
 @@ -1,7 +1,7 @@
@@ -42,7 +42,7 @@ index d6ae7e1..5dfb617 100644
      <string name="language">زبان</string>
      <string name="system_default">پیش‌فرض سیستم</string>
 diff --git a/app/src/main/res/values-ru-rRU/strings.xml b/app/src/main/res/values-ru-rRU/strings.xml
-index 32e9742..9a491b4 100644
+index 652e509..193de30 100644
 --- a/app/src/main/res/values-ru-rRU/strings.xml
 +++ b/app/src/main/res/values-ru-rRU/strings.xml
 @@ -1,7 +1,7 @@
@@ -55,7 +55,7 @@ index 32e9742..9a491b4 100644
      <string name="language">Язык</string>
      <string name="system_default">Системный по умолчанию</string>
 diff --git a/app/src/main/res/values-zh-rCN/strings.xml b/app/src/main/res/values-zh-rCN/strings.xml
-index 421b57c..0b8d7c2 100644
+index 88ee5df..fe8589a 100644
 --- a/app/src/main/res/values-zh-rCN/strings.xml
 +++ b/app/src/main/res/values-zh-rCN/strings.xml
 @@ -1,7 +1,7 @@
@@ -68,7 +68,7 @@ index 421b57c..0b8d7c2 100644
      <string name="language">语言</string>
      <string name="system_default">跟随系统</string>
 diff --git a/app/src/main/res/values-zh-rTW/strings.xml b/app/src/main/res/values-zh-rTW/strings.xml
-index 15ff450..baf3e87 100644
+index d656b2e..a733d50 100644
 --- a/app/src/main/res/values-zh-rTW/strings.xml
 +++ b/app/src/main/res/values-zh-rTW/strings.xml
 @@ -1,7 +1,7 @@
@@ -81,7 +81,7 @@ index 15ff450..baf3e87 100644
      <string name="language">語言</string>
      <string name="system_default">跟隨系統</string>
 diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
-index af72f81..50b393e 100644
+index fa24713..183ade4 100644
 --- a/app/src/main/res/values/strings.xml
 +++ b/app/src/main/res/values/strings.xml
 @@ -1,7 +1,7 @@
@@ -94,5 +94,5 @@ index af72f81..50b393e 100644
      <string name="language">Language</string>
      <string name="system_default">System default</string>
 -- 
-2.55.0
+2.56.0
 

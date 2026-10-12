@@ -1,4 +1,4 @@
-From ba2bccc2c50dfca17998b232b9199630e36863ea Mon Sep 17 00:00:00 2001
+From cf1f0b4776862493385593ccb6e7404852bf38b1 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 19:44:33 +0530
 Subject: [PATCH 37/46] bitproxy: Mullvad login and share-to-import
@@ -804,5 +804,5 @@ index 0000000..478bd9e
 +    }
 +}
 -- 
-2.55.0
+2.56.0
 

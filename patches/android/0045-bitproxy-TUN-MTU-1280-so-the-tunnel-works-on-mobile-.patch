@@ -1,4 +1,4 @@
-From a1dd5fd283ea5e63ed17478b04013f22d74c0958 Mon Sep 17 00:00:00 2001
+From 04b16e6c8bddc93c648932c0af1f861dbe91aad9 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 18:34:36 +0530
 Subject: [PATCH 45/46] bitproxy: TUN MTU 1280 so the tunnel works on mobile
@@ -47,5 +47,5 @@ index 0dd0f19..f91740f 100644
                  "route" to JsonObject(script["route"]!!.jsonObject + ("rules" to JsonArray(rules))),
              ),
 -- 
-2.55.0
+2.56.0
 

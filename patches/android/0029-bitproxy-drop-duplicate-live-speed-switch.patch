@@ -1,4 +1,4 @@
-From 3fbaf543ab876fd1851822d47507437d1a6f4967 Mon Sep 17 00:00:00 2001
+From b4d4f2ca0b13fe34d18a17053dedc0099a200073 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:45:43 +0530
 Subject: [PATCH 29/46] bitproxy: drop duplicate live-speed switch
@@ -52,5 +52,5 @@ index 31495d7..7026b63 100644
              colors = ListItemDefaults.colors(containerColor = Color.Transparent),
          )
 -- 
-2.55.0
+2.56.0
 

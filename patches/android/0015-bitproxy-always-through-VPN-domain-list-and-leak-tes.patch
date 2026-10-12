@@ -1,4 +1,4 @@
-From 2ccbac3adf7a42b6b7e0db9b64f593082b0724f9 Mon Sep 17 00:00:00 2001
+From fe1062d3bb74b0e00d4f451c43d67ccc1038dfe4 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:41:52 +0530
 Subject: [PATCH 15/46] bitproxy: 'always through VPN' domain list and leak
@@ -217,5 +217,5 @@ index 5364af3..0890a65 100644
          assertTrue(ConfigGenerator.generate(GeneratorInput(emptyList(), null, twoServerApps)) is GenerateResult.Error)
      }
 -- 
-2.55.0
+2.56.0
 

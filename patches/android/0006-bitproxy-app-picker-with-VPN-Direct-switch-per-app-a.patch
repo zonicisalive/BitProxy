@@ -1,4 +1,4 @@
-From d8a781b5616bdb8535cc0ced76533a454b538631 Mon Sep 17 00:00:00 2001
+From d47458017e3268e3f3c8aa4ccabb861481480dde Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Thu, 24 Sep 2026 23:59:57 +0530
 Subject: [PATCH 06/46] bitproxy: app picker with VPN/Direct switch per app and
@@ -512,5 +512,5 @@ index 0000000..7fe4640
 +    }
 +}
 -- 
-2.55.0
+2.56.0
 

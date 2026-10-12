@@ -1,4 +1,4 @@
-From e82fafb198380ba2d0d51cfeba7dd63d8a075cb1 Mon Sep 17 00:00:00 2001
+From bed800a2cd928b024a2d736427afbc9ea881bb2c Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:18:21 +0530
 Subject: [PATCH 23/46] bitproxy: live upload/download per app on the dashboard
@@ -146,5 +146,5 @@ index 1c90977..421226a 100644
                          supportingContent = {
                              SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(top = 4.dp)) {
 -- 
-2.55.0
+2.56.0
 

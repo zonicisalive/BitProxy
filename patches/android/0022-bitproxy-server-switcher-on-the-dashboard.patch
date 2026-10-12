@@ -1,4 +1,4 @@
-From 80d3249299639aa4cec6bd37e8f717dec9b8e569 Mon Sep 17 00:00:00 2001
+From 51865be69976ae77ca25336aa96d71053ce65c53 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:16:18 +0530
 Subject: [PATCH 22/46] bitproxy: server switcher on the dashboard
@@ -197,5 +197,5 @@ index 0000000..e181b2d
 +    }
 +}
 -- 
-2.55.0
+2.56.0
 

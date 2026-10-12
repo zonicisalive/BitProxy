@@ -1,4 +1,4 @@
-From a654e3e956b275164e98ae9869fd7b9dbb1eb15b Mon Sep 17 00:00:00 2001
+From 130dca6e473ae2a96e315bd13be91b0bd2ae03c3 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:17:41 +0530
 Subject: [PATCH 09/46] bitproxy: Always-on/lockdown badge and stop
@@ -24,7 +24,7 @@ Upstream hooks: two lines in DashboardScreen, one in DashboardViewModel.
  create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/ui/BitProxyDashboard.kt
 
 diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
-index 2cddad7..e3d4315 100644
+index e1731ca..cfb6846 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 @@ -125,7 +125,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
@@ -240,5 +240,5 @@ index 5ce325e..345c178 100644
              else -> { /* Ignore while transitioning */ }
          }
 -- 
-2.55.0
+2.56.0
 

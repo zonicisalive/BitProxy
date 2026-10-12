@@ -1,4 +1,4 @@
-From a1a45eefa4eb5ba06d0eb8a316b0eac4e3470da5 Mon Sep 17 00:00:00 2001
+From 52173d59b52a8718d82c0c98a70fdbb330410b20 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:36:12 +0530
 Subject: [PATCH 28/46] bitproxy: 'Fastest (auto)' in the server card with
@@ -237,5 +237,5 @@ index a31694c..e1cd7b3 100644
      }
  
 -- 
-2.55.0
+2.56.0
 

@@ -1,4 +1,4 @@
-From e3fb10ef4dd479d0398f1b647f3dda1075747682 Mon Sep 17 00:00:00 2001
+From 0bfa3687eac97e2ce839521ca0986ea71dd9f9d1 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:00:07 +0530
 Subject: [PATCH 20/46] bitproxy: route apps straight to VPN/Direct, no per-app
@@ -160,5 +160,5 @@ index aa5cdc8..79330f0 100644
          assertEquals("VPN", rules[domain]["outbound"]!!.jsonPrimitive.content)
          assertEquals(listOf("example.com"), rules[domain]["domain_suffix"]!!.jsonArray.map { it.jsonPrimitive.content })
 -- 
-2.55.0
+2.56.0
 

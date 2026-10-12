@@ -7,6 +7,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 source "$ROOT/versions.env"
 # Trying a newer upstream without editing versions.env (see check-upstream.sh):
+PATCH_BASE=$SFA_COMMIT # the commit patches/android was exported from
 SING_BOX_TAG=${TRY_SING_BOX_REF:-$SING_BOX_TAG}
 SFA_COMMIT=${TRY_SFA_REF:-$SFA_COMMIT}
 W=${WORK_DIR:-$ROOT/build-work}
@@ -16,6 +17,8 @@ git clone -q --depth 1 --branch "$SING_BOX_TAG" https://github.com/SagerNet/sing
 git init -q sing-box-for-android
 git -C sing-box-for-android fetch -q --depth 1 https://github.com/SagerNet/sing-box-for-android.git "$SFA_COMMIT"
 git -C sing-box-for-android checkout -q FETCH_HEAD
+# The patch base too, so "git am -3" has the original files and can merge small upstream changes.
+[ "$PATCH_BASE" = "$SFA_COMMIT" ] || git -C sing-box-for-android fetch -q --depth 1 https://github.com/SagerNet/sing-box-for-android.git "$PATCH_BASE"
 
 apply() { # repo dir, patch dir
   if compgen -G "$2/*.patch" >/dev/null; then

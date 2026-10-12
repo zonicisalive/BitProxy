@@ -1,4 +1,4 @@
-From 93d35171c09df654252307e2bf21a10239c70e3e Mon Sep 17 00:00:00 2001
+From 1cfd7bd0202185b27a80c9ab98cd338ff6280d25 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 20:00:40 +0530
 Subject: [PATCH 38/46] bitproxy: name release files BitProxy-*
@@ -25,7 +25,7 @@ index e484d2e..f98881a 100644
  
      signingConfigs {
 diff --git a/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
-index b76e72a..e9aaee0 100644
+index b76fc9a..74f62a4 100644
 --- a/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
 +++ b/app/src/github/java/io/nekohasekai/sfa/vendor/GitHubUpdateChecker.kt
 @@ -15,7 +15,7 @@ import java.io.Closeable
@@ -51,5 +51,5 @@ index 0923aff..486dede 100644
          val apks = names.filter { it.endsWith(".apk") }
          for (abi in Build.SUPPORTED_ABIS) apks.firstOrNull { it.endsWith("-$abi.apk") }?.let { return it }
 -- 
-2.55.0
+2.56.0
 

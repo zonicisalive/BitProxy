@@ -1,4 +1,4 @@
-From 9d8a41e5b2f282accab3180626cbc6a27d491883 Mon Sep 17 00:00:00 2001
+From f0c7414a79b10365fef28727e488c2753e861577 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:22:50 +0530
 Subject: [PATCH 24/46] bitproxy: trusted Wi-Fi networks go Direct
@@ -311,5 +311,5 @@ index d049132..a31694c 100644
          assertTrue(ConfigGenerator.generate(GeneratorInput(emptyList(), null, twoServerApps)) is GenerateResult.Error)
      }
 -- 
-2.55.0
+2.56.0
 

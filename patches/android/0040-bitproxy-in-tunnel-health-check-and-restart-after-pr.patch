@@ -1,4 +1,4 @@
-From b43087a303df769c7a97c3e0f62e418ced68946b Mon Sep 17 00:00:00 2001
+From fc4ba7bfd89337d123e5958146dd2fb06d2d49a9 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Sat, 26 Sep 2026 17:15:08 +0530
 Subject: [PATCH 40/46] bitproxy: in-tunnel health check and restart after
@@ -22,7 +22,7 @@ process died only brings the VPN back if it was running.
  create mode 100644 app/src/test/java/io/nekohasekai/sfa/bitproxy/TunnelHealthTest.kt
 
 diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
-index 66e0bf1..38d8ffb 100644
+index 6f1ae14..11ccd00 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 @@ -362,7 +362,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
@@ -275,5 +275,5 @@ index 0000000..c6baab6
 +    }
 +}
 -- 
-2.55.0
+2.56.0
 

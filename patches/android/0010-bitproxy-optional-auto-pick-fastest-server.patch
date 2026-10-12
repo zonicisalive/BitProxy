@@ -1,4 +1,4 @@
-From 6455088b6b9ce3df8d4bcc3bd6d281ec6073ede8 Mon Sep 17 00:00:00 2001
+From fa28f150808c08dcb54ed1310b1cdba0ba31d55f Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:19:47 +0530
 Subject: [PATCH 10/46] bitproxy: optional auto-pick fastest server
@@ -139,5 +139,5 @@ index fb9ef24..5364af3 100644
          assertTrue(ConfigGenerator.generate(GeneratorInput(emptyList(), null, twoServerApps)) is GenerateResult.Error)
      }
 -- 
-2.55.0
+2.56.0
 

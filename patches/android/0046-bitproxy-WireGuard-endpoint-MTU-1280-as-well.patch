@@ -1,4 +1,4 @@
-From f12d1f18b3e387bb0c94cd498d417673fc053c7b Mon Sep 17 00:00:00 2001
+From a07d61775f92d548bd7719c2c0f63ad0f2938e03 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 19:01:48 +0530
 Subject: [PATCH 46/46] bitproxy: WireGuard endpoint MTU 1280 as well
@@ -47,5 +47,5 @@ index f91740f..ad4534b 100644
                  "route" to JsonObject(script["route"]!!.jsonObject + ("rules" to JsonArray(rules))),
              ),
 -- 
-2.55.0
+2.56.0
 

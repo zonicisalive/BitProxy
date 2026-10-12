@@ -1,4 +1,4 @@
-From f25182dc2fbe28063e8115ebfbc78d0f83bc2d15 Mon Sep 17 00:00:00 2001
+From 77e7eb7e488ea46a95312ca6ebf0ab36d54b668e Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 15:05:24 +0530
 Subject: [PATCH 44/46] bitproxy: default TUN stack again (patched sing-tun
@@ -109,5 +109,5 @@ index c67d7ca..0dd0f19 100644
                  "route" to JsonObject(script["route"]!!.jsonObject + ("rules" to JsonArray(rules))),
              ),
 -- 
-2.55.0
+2.56.0
 

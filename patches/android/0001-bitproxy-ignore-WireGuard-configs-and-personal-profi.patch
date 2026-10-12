@@ -1,4 +1,4 @@
-From c0184371ac89bc619979650f508661439fbb6b34 Mon Sep 17 00:00:00 2001
+From e86506a3ef6162d00ebf0091231680697407e3d3 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Thu, 24 Sep 2026 23:37:14 +0530
 Subject: [PATCH 01/46] bitproxy: ignore WireGuard configs and personal
@@ -23,5 +23,5 @@ index 0d61218..fdd4185 100644
 +singbox_profile.json
 +/local-profiles/
 -- 
-2.55.0
+2.56.0
 

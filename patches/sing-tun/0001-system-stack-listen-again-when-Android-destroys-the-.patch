@@ -1,4 +1,4 @@
-From 64cbf2c8ac5e799100acbfcf339682e7971f7c2f Mon Sep 17 00:00:00 2001
+From 105d29971ebcf56e05f8dfa90d429d6d02fbbd9b Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 14:51:24 +0530
 Subject: [PATCH] system stack: listen again when Android destroys the TCP
@@ -14,7 +14,7 @@ on the same address and port instead.
  1 file changed, 53 insertions(+), 4 deletions(-)
 
 diff --git a/stack_system.go b/stack_system.go
-index 46fadb0..7e3f3e4 100644
+index 3ff1c4f..1ea5ca0 100644
 --- a/stack_system.go
 +++ b/stack_system.go
 @@ -7,6 +7,7 @@ import (
@@ -134,5 +134,5 @@ index 46fadb0..7e3f3e4 100644
  	switch ipHdr.TransportProtocol() {
  	case header.TCPProtocolNumber:
 -- 
-2.55.0
+2.56.0
 

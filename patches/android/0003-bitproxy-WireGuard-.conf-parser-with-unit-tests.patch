@@ -1,4 +1,4 @@
-From 8b4430add828a3a0b7e04bc4ed549e66e7d60c03 Mon Sep 17 00:00:00 2001
+From 9083bb6f87756c02795902e25ffae07b04ff976d Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Thu, 24 Sep 2026 23:43:41 +0530
 Subject: [PATCH 03/46] bitproxy: WireGuard .conf parser with unit tests
@@ -487,5 +487,5 @@ index 0000000..60af998
 +    }
 +}
 -- 
-2.55.0
+2.56.0
 

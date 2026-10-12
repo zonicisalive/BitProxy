@@ -1,4 +1,4 @@
-From 99265d929a275c935bf9835927b22f575d5e077e Mon Sep 17 00:00:00 2001
+From bd7957d981ee941e89b10091d4fd89cf531b4462 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:35:45 +0530
 Subject: [PATCH 12/46] bitproxy: ask about new apps, re-resolve on
@@ -187,5 +187,5 @@ index 1267be4..20bda41 100644
  
      /** The service stopped with an error: tell the user even if the UI is closed. */
 -- 
-2.55.0
+2.56.0
 

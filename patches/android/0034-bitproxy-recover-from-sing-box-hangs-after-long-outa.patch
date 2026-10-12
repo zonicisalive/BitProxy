@@ -1,4 +1,4 @@
-From 26bfde58788097ad8986058e50ed87217ebf0fa7 Mon Sep 17 00:00:00 2001
+From 77615ae0d9d0318b2b8eff4b7e60f026488bad7c Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 10:14:46 +0530
 Subject: [PATCH 34/46] bitproxy: recover from sing-box hangs after long
@@ -36,7 +36,7 @@ itself Stopped.
  create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/EventLog.kt
 
 diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
-index 77c150b..66e0bf1 100644
+index 1a833ce..6f1ae14 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 @@ -316,6 +316,7 @@ class BoxService(private val service: Service, private val platformInterface: Pl
@@ -303,5 +303,5 @@ index a1d0313..a04f886 100644
  
  /** Report + applied config + this app's recent logcat, with every private/preshared key masked. */
 -- 
-2.55.0
+2.56.0
 

@@ -1,4 +1,4 @@
-From 3429a83f214c65e48b50418a98f80e28998c2e61 Mon Sep 17 00:00:00 2001
+From 0604dd7ff8b6bc1ebf3a52d0053cdbe3661090fb Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 14:23:02 +0530
 Subject: [PATCH 43/46] bitproxy: TUN stack gvisor, so Android can't break all
@@ -58,5 +58,5 @@ index 901ae44..c67d7ca 100644
                  "route" to JsonObject(script["route"]!!.jsonObject + ("rules" to JsonArray(rules))),
              ),
 -- 
-2.55.0
+2.56.0
 

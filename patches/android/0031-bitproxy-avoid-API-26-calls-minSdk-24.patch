@@ -1,4 +1,4 @@
-From 1838a916924fe6439d56e764375557f7f5c2cb22 Mon Sep 17 00:00:00 2001
+From 288bb6a620e15aec5148514c3562bfc2b2e3a441 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:58:51 +0530
 Subject: [PATCH 31/46] bitproxy: avoid API 26 calls (minSdk 24)
@@ -77,5 +77,5 @@ index ba2d47f..292bede 100644
      }.getOrElse { "logcat failed: ${it.message}" }
      val text = "== BitProxy diagnostics ==\n$report\n\n== Applied config ==\n$config\n\n== Log ==\n$logcat"
 -- 
-2.55.0
+2.56.0
 

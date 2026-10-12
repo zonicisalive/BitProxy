@@ -1,4 +1,4 @@
-From 9a4c656f4f7de408d9461bd44e90a87fc82dacd2 Mon Sep 17 00:00:00 2001
+From f4bd2cc53383fc788e50b4e2386a5e31ebbfec4b Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:11:00 +0530
 Subject: [PATCH 08/46] bitproxy: service start fallback and failure
@@ -19,7 +19,7 @@ Upstream hooks: two one-line calls in BoxService.
  create mode 100644 app/src/main/java/io/nekohasekai/sfa/bitproxy/BitProxyServiceHooks.kt
 
 diff --git a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
-index 17f909c..2cddad7 100644
+index e63e4bf..e1731ca 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/bg/BoxService.kt
 @@ -28,6 +28,7 @@ import io.nekohasekai.libbox.PlatformInterface
@@ -159,5 +159,5 @@ index 0000000..382f1a2
 +    }
 +}
 -- 
-2.55.0
+2.56.0
 

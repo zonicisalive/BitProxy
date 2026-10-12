@@ -1,4 +1,4 @@
-From 00c7d9c182adba0567785f2079641f11dddc34f6 Mon Sep 17 00:00:00 2001
+From 836fa98b4bf9d41b5dbf095654f223c4b2a4cfad Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:49:52 +0530
 Subject: [PATCH 16/46] bitproxy: VPN/Direct switches for apps on the dashboard
@@ -184,5 +184,5 @@ index 9c0e868..9620884 100644
              // Show cards when service is running OR if it's the Profiles card (always available)
              val serviceRunning = uiState.isStatusVisible
 -- 
-2.55.0
+2.56.0
 

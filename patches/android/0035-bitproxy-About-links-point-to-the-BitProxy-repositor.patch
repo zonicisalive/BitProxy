@@ -1,4 +1,4 @@
-From 5f845654988a2106f5226bb3f9a673df5289b842 Mon Sep 17 00:00:00 2001
+From 901918c4ae0311707ca91f8b7f2d77add9dfeaaa Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 10:35:42 +0530
 Subject: [PATCH 35/46] bitproxy: About links point to the BitProxy repository
@@ -39,5 +39,5 @@ index 7500ae7..ed842a5 100644
                          },
                      colors =
 -- 
-2.55.0
+2.56.0
 

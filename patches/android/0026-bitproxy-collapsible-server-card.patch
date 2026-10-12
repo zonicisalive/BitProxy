@@ -1,4 +1,4 @@
-From 116643473a2f090fe32a0e903c6b4917be46d12f Mon Sep 17 00:00:00 2001
+From 90e2116c84600ce1b5c069068522cbf37b3da7f7 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:31:52 +0530
 Subject: [PATCH 26/46] bitproxy: collapsible server card
@@ -153,5 +153,5 @@ index e181b2d..b8f6d14 100644
          }
      }
 -- 
-2.55.0
+2.56.0
 

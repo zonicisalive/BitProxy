@@ -1,4 +1,4 @@
-From 8176dd11b9ebf228f4cc68f9a5277f27f6124a1c Mon Sep 17 00:00:00 2001
+From 27d544fe55062e56c6c54071091f9508f925ea10 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:39:03 +0530
 Subject: [PATCH 14/46] bitproxy: keep upstream update checker off
@@ -12,10 +12,10 @@ off and mark the prompt as answered once the app has initialized.
  2 files changed, 10 insertions(+), 1 deletion(-)
 
 diff --git a/app/src/main/java/io/nekohasekai/sfa/Application.kt b/app/src/main/java/io/nekohasekai/sfa/Application.kt
-index 99c843d..38b93bd 100644
+index d983093..06b3712 100644
 --- a/app/src/main/java/io/nekohasekai/sfa/Application.kt
 +++ b/app/src/main/java/io/nekohasekai/sfa/Application.kt
-@@ -69,7 +69,7 @@ class Application : Application() {
+@@ -71,7 +71,7 @@ class Application : Application() {
              HookStatusClient.register(this@Application)
              PrivilegeSettingsClient.register(this@Application)
              initialize(baseDir, workingDir, tempDir)
@@ -45,5 +45,5 @@ index 20bda41..eac30a3 100644
       * Called before the command server is created. On a cold start by the system (Always-on,
       * boot) the service can get here before Libbox.setup() set the base path; the command
 -- 
-2.55.0
+2.56.0
 

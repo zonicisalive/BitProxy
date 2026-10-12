@@ -1,4 +1,4 @@
-From 2c5969d058317f5c01ae192ef118e9210620c6a1 Mon Sep 17 00:00:00 2001
+From 00e48f2b4f64ad3a9b77b801438f4922fa73e6ca Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 02:34:43 +0530
 Subject: [PATCH 33/46] bitproxy: rebind the UI when Apply switches proxy ->
@@ -37,5 +37,5 @@ index 5cb1726..341a446 100644
          if (modeChanged) {
              // Switching from a proxy-only profile to VPN mode needs a full restart.
 -- 
-2.55.0
+2.56.0
 

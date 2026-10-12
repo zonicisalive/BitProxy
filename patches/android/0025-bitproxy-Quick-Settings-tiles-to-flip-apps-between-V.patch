@@ -1,4 +1,4 @@
-From ff4d9618d630247f60cdf11a3cbd58fea1184cc7 Mon Sep 17 00:00:00 2001
+From 9c2e4fd0f2a56fe3af00fca00793af16f98276f3 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:27:48 +0530
 Subject: [PATCH 25/46] bitproxy: Quick Settings tiles to flip apps between VPN
@@ -321,5 +321,5 @@ index 0000000..103b449
 +    }
 +}
 -- 
-2.55.0
+2.56.0
 

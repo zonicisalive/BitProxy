@@ -1,4 +1,4 @@
-From 486bcb4951dce2be78acb6a0a43c3f6cc563aa8f Mon Sep 17 00:00:00 2001
+From f6e19367e12e5c59bdca1d942ede19364805e9d3 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Sat, 26 Sep 2026 18:01:55 +0530
 Subject: [PATCH 42/46] bitproxy: update source is BitProxy releases only;
@@ -53,5 +53,5 @@ index fe39fc4..3d12598 100644
 +    <string name="update_track_beta">Beta (also sing-box alpha, beta and rc)</string>
  </resources>
 -- 
-2.55.0
+2.56.0
 
