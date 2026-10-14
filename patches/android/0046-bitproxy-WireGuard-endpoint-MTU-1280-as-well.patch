@@ -1,7 +1,7 @@
 From a07d61775f92d548bd7719c2c0f63ad0f2938e03 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Wed, 30 Sep 2026 19:01:48 +0530
-Subject: [PATCH 46/46] bitproxy: WireGuard endpoint MTU 1280 as well
+Subject: [PATCH 46/47] bitproxy: WireGuard endpoint MTU 1280 as well
 
 TCP is terminated at the TUN and re-sent through the endpoint, whose own
 MTU (sing-box default 1408) decides the tunnel packet size; the TUN MTU

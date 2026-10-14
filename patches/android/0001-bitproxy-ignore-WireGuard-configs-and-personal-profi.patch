@@ -1,7 +1,7 @@
 From e86506a3ef6162d00ebf0091231680697407e3d3 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Thu, 24 Sep 2026 23:37:14 +0530
-Subject: [PATCH 01/46] bitproxy: ignore WireGuard configs and personal
+Subject: [PATCH 01/47] bitproxy: ignore WireGuard configs and personal
  profiles
 
 ---

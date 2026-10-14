@@ -1,7 +1,7 @@
 From 77615ae0d9d0318b2b8eff4b7e60f026488bad7c Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 10:14:46 +0530
-Subject: [PATCH 34/46] bitproxy: recover from sing-box hangs after long
+Subject: [PATCH 34/47] bitproxy: recover from sing-box hangs after long
  outages
 
 Seen on a OnePlus 15: OxygenOS switched Wi-Fi off at night with mobile

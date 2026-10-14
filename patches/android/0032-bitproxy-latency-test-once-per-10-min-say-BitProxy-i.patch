@@ -1,7 +1,7 @@
 From c60a6af0b5657800fb466b690c839c60e121df62 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 02:12:20 +0530
-Subject: [PATCH 32/46] bitproxy: latency test once per 10 min; say BitProxy in
+Subject: [PATCH 32/47] bitproxy: latency test once per 10 min; say BitProxy in
  UI texts
 
 The dashboard server card started a latency test every time it came

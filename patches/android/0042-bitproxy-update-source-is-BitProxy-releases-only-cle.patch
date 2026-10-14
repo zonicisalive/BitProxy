@@ -1,7 +1,7 @@
 From f6e19367e12e5c59bdca1d942ede19364805e9d3 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Sat, 26 Sep 2026 18:01:55 +0530
-Subject: [PATCH 42/46] bitproxy: update source is BitProxy releases only;
+Subject: [PATCH 42/47] bitproxy: update source is BitProxy releases only;
  clearer update track names
 
 F-Droid only has upstream SFA (another app id and signing key), so it is

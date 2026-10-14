@@ -1,7 +1,7 @@
 From ecd046d1c5ef115a7b52a9b5ed8fc23e536bbecd Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:31:52 +0530
-Subject: [PATCH 27/46] bitproxy: call the app BitProxy everywhere; source
+Subject: [PATCH 27/47] bitproxy: call the app BitProxy everywhere; source
  link, no sponsor
 
 - VPN session name (shown by Android) and the notification title

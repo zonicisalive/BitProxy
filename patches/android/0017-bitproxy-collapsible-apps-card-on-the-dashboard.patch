@@ -1,7 +1,7 @@
 From a4cc2b2f92a11a262013d68672738f7108dcc546 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:51:34 +0530
-Subject: [PATCH 17/46] bitproxy: collapsible apps card on the dashboard
+Subject: [PATCH 17/47] bitproxy: collapsible apps card on the dashboard
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

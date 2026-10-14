@@ -1,7 +1,7 @@
 From 4b37365955d09e9b0591199b1cf8fcda024f4b1d Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:14:02 +0530
-Subject: [PATCH 21/46] bitproxy: Block mode per app; sniff strictly after all
+Subject: [PATCH 21/47] bitproxy: Block mode per app; sniff strictly after all
  app rules
 
 Block: a third mode next to VPN and Direct. Blocked apps get a reject

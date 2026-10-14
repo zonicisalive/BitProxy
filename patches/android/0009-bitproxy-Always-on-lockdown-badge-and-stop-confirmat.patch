@@ -1,7 +1,7 @@
 From 130dca6e473ae2a96e315bd13be91b0bd2ae03c3 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:17:41 +0530
-Subject: [PATCH 09/46] bitproxy: Always-on/lockdown badge and stop
+Subject: [PATCH 09/47] bitproxy: Always-on/lockdown badge and stop
  confirmation
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

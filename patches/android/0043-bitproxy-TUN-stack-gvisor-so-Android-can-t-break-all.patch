@@ -1,7 +1,7 @@
 From 0604dd7ff8b6bc1ebf3a52d0053cdbe3661090fb Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Mon, 28 Sep 2026 14:23:02 +0530
-Subject: [PATCH 43/46] bitproxy: TUN stack gvisor, so Android can't break all
+Subject: [PATCH 43/47] bitproxy: TUN stack gvisor, so Android can't break all
  TCP
 
 With the default "mixed" stack, TCP goes through a kernel socket that

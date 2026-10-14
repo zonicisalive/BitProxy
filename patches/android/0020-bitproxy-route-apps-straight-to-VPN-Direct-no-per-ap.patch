@@ -1,7 +1,7 @@
 From 0bfa3687eac97e2ce839521ca0986ea71dd9f9d1 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 01:00:07 +0530
-Subject: [PATCH 20/46] bitproxy: route apps straight to VPN/Direct, no per-app
+Subject: [PATCH 20/47] bitproxy: route apps straight to VPN/Direct, no per-app
  groups
 
 conf-merger.py made one selector per app so apps could be switched in

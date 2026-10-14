@@ -1,7 +1,7 @@
 From 227a6735662677262425e10370483c8f3442702e Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Thu, 24 Sep 2026 23:54:19 +0530
-Subject: [PATCH 05/46] bitproxy: import WireGuard servers in-app
+Subject: [PATCH 05/47] bitproxy: import WireGuard servers in-app
 
 New BitProxy screen (Settings > BitProxy) to import .conf files through
 the system file picker, select the active server and delete servers.

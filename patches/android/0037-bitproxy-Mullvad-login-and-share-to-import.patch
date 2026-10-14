@@ -1,7 +1,7 @@
 From cf1f0b4776862493385593ccb6e7404852bf38b1 Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 19:44:33 +0530
-Subject: [PATCH 37/46] bitproxy: Mullvad login and share-to-import
+Subject: [PATCH 37/47] bitproxy: Mullvad login and share-to-import
 
 Mullvad: log in with the account number, register one WireGuard key as a
 device (X25519 key pair made in-app), pick locations and get one server

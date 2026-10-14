@@ -1,7 +1,7 @@
 From 00e48f2b4f64ad3a9b77b801438f4922fa73e6ca Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 02:34:43 +0530
-Subject: [PATCH 33/46] bitproxy: rebind the UI when Apply switches proxy ->
+Subject: [PATCH 33/47] bitproxy: rebind the UI when Apply switches proxy ->
  VPN mode
 
 On a fresh install the UI binds ProxyService (no profile yet). The first

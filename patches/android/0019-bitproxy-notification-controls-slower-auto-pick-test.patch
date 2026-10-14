@@ -1,7 +1,7 @@
 From a69d1a8105800e492cf1b8470de2e8539ed0975d Mon Sep 17 00:00:00 2001
 From: ZonicExists <71136987+zonicisalive@users.noreply.github.com>
 Date: Fri, 25 Sep 2026 00:57:09 +0530
-Subject: [PATCH 19/46] bitproxy: notification controls; slower auto-pick tests
+Subject: [PATCH 19/47] bitproxy: notification controls; slower auto-pick tests
 
 Notifications card on the BitProxy screen: turn new-app prompts on/off,
 turn the live speed in the VPN notification on/off (upstream setting),
